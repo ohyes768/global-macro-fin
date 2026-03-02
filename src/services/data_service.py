@@ -139,20 +139,20 @@ class DataService:
 
         if us_data:
             us_df = pd.DataFrame(us_data)
-            us_df.columns = ["3m", "2y", "10y"]
-            self._ensure_file_exists(self.files["us_treasuries"], ["3m", "2y", "10y"])
+            us_df.columns = ["美债3m", "美债2y", "美债10y"]
+            self._ensure_file_exists(self.files["us_treasuries"], ["美债3m", "美债2y", "美债10y"])
             self.append_data("us_treasuries", us_df)
 
         # 保存欧债数据
         if "eu_10y" in data and not data["eu_10y"].empty:
-            eu_df = pd.DataFrame({"10y": data["eu_10y"]})
-            self._ensure_file_exists(self.files["eu_bonds"], ["10y"])
+            eu_df = pd.DataFrame({"欧债10y": data["eu_10y"]})
+            self._ensure_file_exists(self.files["eu_bonds"], ["欧债10y"])
             self.append_data("eu_bonds", eu_df)
 
         # 保存日债数据
         if "jp_10y" in data and not data["jp_10y"].empty:
-            jp_df = pd.DataFrame({"10y": data["jp_10y"]})
-            self._ensure_file_exists(self.files["jp_bonds"], ["10y"])
+            jp_df = pd.DataFrame({"日债10y": data["jp_10y"]})
+            self._ensure_file_exists(self.files["jp_bonds"], ["日债10y"])
             self.append_data("jp_bonds", jp_df)
 
     def query_data(
@@ -188,25 +188,27 @@ class DataService:
             # 筛选时间范围
             us_filtered = us_data[(us_data.index >= start_date) & (us_data.index <= end_date)]
             result["dates"] = us_filtered.index.strftime("%Y-%m-%d").tolist()
-            for col in ["3m", "2y", "10y"]:
-                if col in us_filtered.columns:
-                    result["us_treasuries"][col] = us_filtered[col].tolist()
+            # 新列名映射到 API 格式
+            col_mapping = {"美债3m": "3m", "美债2y": "2y", "美债10y": "10y"}
+            for new_col, old_col in col_mapping.items():
+                if new_col in us_filtered.columns:
+                    result["us_treasuries"][old_col] = us_filtered[new_col].tolist()
 
         # 加载欧债数据
         eu_data = self.load_data("eu_bonds")
         if not eu_data.empty:
             eu_data = eu_data.ffill()
             eu_filtered = eu_data[(eu_data.index >= start_date) & (eu_data.index <= end_date)]
-            if "10y" in eu_filtered.columns:
-                result["eu_10y"] = eu_filtered["10y"].tolist()
+            if "欧债10y" in eu_filtered.columns:
+                result["eu_10y"] = eu_filtered["欧债10y"].tolist()
 
         # 加载日债数据
         jp_data = self.load_data("jp_bonds")
         if not jp_data.empty:
             jp_data = jp_data.ffill()
             jp_filtered = jp_data[(jp_data.index >= start_date) & (jp_data.index <= end_date)]
-            if "10y" in jp_filtered.columns:
-                result["jp_10y"] = jp_filtered["10y"].tolist()
+            if "日债10y" in jp_filtered.columns:
+                result["jp_10y"] = jp_filtered["日债10y"].tolist()
 
         return result
 
