@@ -19,6 +19,12 @@ class USTreasuries(BaseModel):
     y10: TreasuryData
 
 
+class USTreasuriesUpdateData(BaseModel):
+    """美债更新响应数据"""
+
+    us_treasuries: USTreasuries
+
+
 class MacroData(BaseModel):
     """宏观经济数据"""
 
@@ -32,7 +38,7 @@ class UpdateResponse(BaseModel):
 
     success: bool
     message: str
-    data: Optional[MacroData] = None
+    data: Optional[USTreasuriesUpdateData | MacroData] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None
 

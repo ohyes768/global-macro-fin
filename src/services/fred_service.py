@@ -33,6 +33,12 @@ class FredService:
         Returns:
             数据系列
         """
+        # OECD 数据（德国、日本）是月度数据，自动扩展查询范围到 365 天
+        oecd_codes = {"IRLTLT01DEM156N", "IRLTLT01JPM156N"}
+        if code in oecd_codes:
+            start_date = (end_date - pd.Timedelta(days=365)).normalize()
+            logger.info(f"{code} 是 OECD 月度数据，自动扩展查询范围: {start_date} 到 {end_date}")
+
         logger.info(f"获取 FRED 数据: {code}, 从 {start_date} 到 {end_date}")
 
         try:
@@ -59,9 +65,18 @@ class FredService:
         """
         result = {}
 
+        # OECD 数据（德国、日本）是月度数据，需要更长的查询范围
+        oecd_codes = {"eu_10y", "jp_10y"}
+
         for name, code in self.fred_codes.items():
             try:
-                series = await self.fetch_series(code, start_date, end_date)
+                # 对 OECD 数据使用更长的日期范围（365天）
+                if name in oecd_codes:
+                    oecd_start = (end_date - pd.Timedelta(days=365)).normalize()
+                    logger.info(f"{name} 是月度数据，扩大查询范围: {oecd_start} 到 {end_date}")
+                    series = await self.fetch_series(code, oecd_start, end_date)
+                else:
+                    series = await self.fetch_series(code, start_date, end_date)
                 result[name] = series
             except Exception as e:
                 logger.error(f"获取 {name} ({code}) 数据时出错: {e}")

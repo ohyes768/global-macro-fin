@@ -1,10 +1,11 @@
 """API 路由模块"""
+print("[INIT-20260303-0942] routes.py 模块已加载")
 from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime, timedelta
 import pandas as pd
 from typing import Optional
 
-from src.models import UpdateResponse, DataResponse, HealthResponse, MacroData, TreasuryData, USTreasuries
+from src.models import UpdateResponse, DataResponse, HealthResponse, MacroData, TreasuryData, USTreasuries, USTreasuriesUpdateData
 from src.services.fred_service import get_fred_service
 from src.services.data_service import get_data_service
 from src.utils.logger import setup_logger
@@ -37,9 +38,231 @@ def is_updating() -> bool:
     return _is_updating
 
 
+async def _fetch_us_treasuries(
+    fred_service, start_date: pd.Timestamp, end_date: pd.Timestamp
+) -> dict:
+    """获取美国国债数据的内部函数
+
+    Args:
+        fred_service: FRED 服务实例
+        start_date: 起始日期
+        end_date: 结束日期
+
+    Returns:
+        美债数据字典
+    """
+    logger.info(f"获取美国国债数据范围: {start_date} 到 {end_date}")
+
+    us_data = {}
+    us_codes = {"us_3m", "us_2y", "us_10y"}
+
+    for name in us_codes:
+        code = settings.fred_codes[name]
+        try:
+            series = await fred_service.fetch_series(code, start_date, end_date)
+            us_data[name] = series
+        except Exception as e:
+            logger.error(f"获取 {name} ({code}) 数据时出错: {e}")
+            us_data[name] = pd.Series(dtype="float64")
+
+    return us_data
+
+
+async def _fetch_oecd_bonds(
+    fred_service, start_date: pd.Timestamp, end_date: pd.Timestamp
+) -> dict:
+    """获取 OECD 债券数据的内部函数
+
+    Args:
+        fred_service: FRED 服务实例
+        start_date: 起始日期
+        end_date: 结束日期
+
+    Returns:
+        OECD 债券数据字典
+    """
+    logger.info(f"获取 OECD 债券数据范围: {start_date} 到 {end_date}")
+
+    oecd_data = {}
+    oecd_codes = {"eu_10y", "jp_10y"}
+
+    for name in oecd_codes:
+        code = settings.fred_codes[name]
+        try:
+            series = await fred_service.fetch_series(code, start_date, end_date)
+            oecd_data[name] = series
+        except Exception as e:
+            logger.error(f"获取 {name} ({code}) 数据时出错: {e}")
+            oecd_data[name] = pd.Series(dtype="float64")
+
+    return oecd_data
+
+
+def _build_response_data(new_data: dict, end_date: pd.Timestamp) -> MacroData:
+    """构建响应数据的内部函数
+
+    Args:
+        new_data: 新获取的数据字典
+        end_date: 结束日期
+
+    Returns:
+        MacroData 响应对象
+    """
+    latest = {}
+    for name, series in new_data.items():
+        if not series.empty:
+            last_idx = series.last_valid_index()
+            if last_idx is not None:
+                latest[name] = {"date": last_idx.strftime("%Y-%m-%d"), "value": float(series[last_idx])}
+
+    us_m3 = latest.get("us_3m", TreasuryData(date=end_date.date(), value=None))
+    us_y2 = latest.get("us_2y", TreasuryData(date=end_date.date(), value=None))
+    us_y10 = latest.get("us_10y", TreasuryData(date=end_date.date(), value=None))
+    eu_10y = latest.get("eu_10y", TreasuryData(date=end_date.date(), value=None))
+    jp_10y = latest.get("jp_10y", TreasuryData(date=end_date.date(), value=None))
+
+    return MacroData(
+        us_treasuries=USTreasuries(m3=us_m3, y2=us_y2, y10=us_y10),
+        eu_10y=eu_10y,
+        jp_10y=jp_10y,
+    )
+
+
+@router.post("/api/fetch/us-treasuries/history", response_model=UpdateResponse)
+async def fetch_us_treasuries_history():
+    """获取美国国债历史数据接口 - 从 2000 年开始获取全部历史数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取美国国债历史数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        us_start = pd.Timestamp(settings.historical_start_date)
+
+        logger.info(f"获取美债历史数据，从 {us_start} 到 {latest_end}")
+
+        new_data = await _fetch_us_treasuries(fred_service, us_start, latest_end)
+
+        if not any(not series.empty for series in new_data.values()):
+            raise Exception("未能获取到任何美债数据")
+
+        data_service.save_fred_data(new_data)
+
+        # 构建只包含美债的响应数据
+        latest = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest[name] = {"date": last_idx.strftime("%Y-%m-%d"), "value": float(series[last_idx])}
+
+        us_m3 = latest.get("us_3m", TreasuryData(date=latest_end.date(), value=None))
+        us_y2 = latest.get("us_2y", TreasuryData(date=latest_end.date(), value=None))
+        us_y10 = latest.get("us_10y", TreasuryData(date=latest_end.date(), value=None))
+
+        response_data = USTreasuriesUpdateData(
+            us_treasuries=USTreasuries(m3=us_m3, y2=us_y2, y10=us_y10)
+        )
+
+        logger.info("美国国债历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="美国国债历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取美国国债历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取美国国债历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/api/update/us-treasuries", response_model=UpdateResponse)
+async def update_us_treasuries():
+    """更新美国国债数据接口 - 增量更新最近 7 天的数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新美国国债数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        us_start = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新美债数据，从 {us_start} 到 {latest_end}")
+
+        new_data = await _fetch_us_treasuries(fred_service, us_start, latest_end)
+
+        if not any(not series.empty for series in new_data.values()):
+            raise Exception("未能获取到任何美债新数据")
+
+        data_service.save_fred_data(new_data)
+
+        # 构建只包含美债的响应数据
+        latest = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest[name] = {"date": last_idx.strftime("%Y-%m-%d"), "value": float(series[last_idx])}
+
+        us_m3 = latest.get("us_3m", TreasuryData(date=latest_end.date(), value=None))
+        us_y2 = latest.get("us_2y", TreasuryData(date=latest_end.date(), value=None))
+        us_y10 = latest.get("us_10y", TreasuryData(date=latest_end.date(), value=None))
+
+        response_data = USTreasuriesUpdateData(
+            us_treasuries=USTreasuries(m3=us_m3, y2=us_y2, y10=us_y10)
+        )
+
+        logger.info("美国国债数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="美国国债数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"美国国债数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"美国国债数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
 @router.post("/api/update", response_model=UpdateResponse)
 async def update_data():
-    """更新数据接口 - n8n 调用此接口触发数据更新"""
+    """更新数据接口 - n8n 调用此接口触发数据更新（美债 + OECD债券）"""
     global _is_updating
 
     # 检查是否正在更新
@@ -57,26 +280,32 @@ async def update_data():
         fred_service = get_fred_service()
         data_service = get_data_service()
 
-        # 获取需要更新的时间范围
-        end = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
-
-        # 检查各数据源的最后日期
-        start_dates = {}
-        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds"]:
-            last_date = data_service.get_last_date(data_type)
-            if last_date is None:
-                # 首次获取，从历史起始日期开始
-                start_dates[data_type] = pd.Timestamp(settings.historical_start_date)
-            else:
-                # 增量更新，从最后日期的下一天开始
-                start_dates[data_type] = last_date + pd.Timedelta(days=1)
-
-        # 获取最新数据（使用最近的时间范围，确保获取到数据）
         latest_end = pd.Timestamp.now().normalize()
-        latest_start = (latest_end - pd.Timedelta(days=7)).normalize()
 
-        logger.info(f"获取数据范围: {latest_start} 到 {latest_end}")
-        new_data = await fred_service.fetch_all_treasuries(latest_start, latest_end)
+        # 检查美债数据的最后日期
+        us_last_date = data_service.get_last_date("us_treasuries")
+        if us_last_date is None:
+            # 首次获取，从 2000 年开始
+            us_start = pd.Timestamp(settings.historical_start_date)
+            logger.info(f"首次获取美债历史数据，从 {us_start} 到 {latest_end}")
+        else:
+            # 增量更新，获取最近 7 天
+            us_start = (latest_end - pd.Timedelta(days=7)).normalize()
+            logger.info(f"增量更新美债数据，从 {us_start} 到 {latest_end}")
+
+        # OECD 数据使用 365 天范围
+        oecd_start = (latest_end - pd.Timedelta(days=365)).normalize()
+        logger.info(f"获取 OECD 债券数据范围: {oecd_start} 到 {latest_end}")
+
+        new_data = {}
+
+        # 获取美国国债数据（3m, 2y, 10y）
+        us_data = await _fetch_us_treasuries(fred_service, us_start, latest_end)
+        new_data.update(us_data)
+
+        # 获取 OECD 数据（德国、日本 10y）
+        oecd_data = await _fetch_oecd_bonds(fred_service, oecd_start, latest_end)
+        new_data.update(oecd_data)
 
         if not new_data:
             raise Exception("未能获取到任何新数据")
@@ -84,29 +313,7 @@ async def update_data():
         # 保存数据
         data_service.save_fred_data(new_data)
 
-        # 构建响应数据
-        response_data = None
-        if new_data:
-            # 获取最新数据点
-            latest = {}
-            for name, series in new_data.items():
-                if not series.empty:
-                    last_idx = series.last_valid_index()
-                    if last_idx is not None:
-                        latest[name] = {"date": last_idx.strftime("%Y-%m-%d"), "value": float(series[last_idx])}
-
-            # 构建响应
-            us_m3 = latest.get("us_3m", TreasuryData(date=end.date(), value=None))
-            us_y2 = latest.get("us_2y", TreasuryData(date=end.date(), value=None))
-            us_y10 = latest.get("us_10y", TreasuryData(date=end.date(), value=None))
-            eu_10y = latest.get("eu_10y", TreasuryData(date=end.date(), value=None))
-            jp_10y = latest.get("jp_10y", TreasuryData(date=end.date(), value=None))
-
-            response_data = MacroData(
-                us_treasuries=USTreasuries(m3=us_m3, y2=us_y2, y10=us_y10),
-                eu_10y=eu_10y,
-                jp_10y=jp_10y,
-            )
+        response_data = _build_response_data(new_data, latest_end)
 
         logger.info("数据更新成功")
         return UpdateResponse(

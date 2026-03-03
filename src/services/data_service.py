@@ -143,10 +143,10 @@ class DataService:
             self._ensure_file_exists(self.files["us_treasuries"], ["美债3m", "美债2y", "美债10y"])
             self.append_data("us_treasuries", us_df)
 
-        # 保存欧债数据
+        # 保存德债数据（德国10年期国债）
         if "eu_10y" in data and not data["eu_10y"].empty:
-            eu_df = pd.DataFrame({"欧债10y": data["eu_10y"]})
-            self._ensure_file_exists(self.files["eu_bonds"], ["欧债10y"])
+            eu_df = pd.DataFrame({"德债10y": data["eu_10y"]})
+            self._ensure_file_exists(self.files["eu_bonds"], ["德债10y"])
             self.append_data("eu_bonds", eu_df)
 
         # 保存日债数据
@@ -194,13 +194,13 @@ class DataService:
                 if new_col in us_filtered.columns:
                     result["us_treasuries"][old_col] = us_filtered[new_col].tolist()
 
-        # 加载欧债数据
+        # 加载德债数据
         eu_data = self.load_data("eu_bonds")
         if not eu_data.empty:
             eu_data = eu_data.ffill()
             eu_filtered = eu_data[(eu_data.index >= start_date) & (eu_data.index <= end_date)]
-            if "欧债10y" in eu_filtered.columns:
-                result["eu_10y"] = eu_filtered["欧债10y"].tolist()
+            if "德债10y" in eu_filtered.columns:
+                result["eu_10y"] = eu_filtered["德债10y"].tolist()
 
         # 加载日债数据
         jp_data = self.load_data("jp_bonds")

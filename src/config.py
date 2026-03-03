@@ -1,6 +1,5 @@
 """配置管理模块"""
 from pydantic_settings import BaseSettings
-from functools import lru_cache
 
 
 class Settings(BaseSettings):
@@ -26,8 +25,10 @@ class Settings(BaseSettings):
         "us_3m": "DGS3MO",
         "us_2y": "DGS2",
         "us_10y": "DGS10",
-        "eu_10y": "DGS10EUR",
-        "jp_10y": "DGS10JPY",
+        # 德国10年期国债收益率（OECD数据）
+        "eu_10y": "IRLTLT01DEM156N",
+        # 日本10年期国债收益率（OECD数据）
+        "jp_10y": "IRLTLT01JPM156N",
     }
 
     class Config:
@@ -35,7 +36,13 @@ class Settings(BaseSettings):
         case_sensitive = False
 
 
-@lru_cache()
+# 配置单例
+_settings: Settings = None
+
+
 def get_settings() -> Settings:
     """获取配置单例"""
-    return Settings()
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
