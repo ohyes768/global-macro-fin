@@ -1,0 +1,27 @@
+services:
+  global-macro-fin:
+    build: .
+    container_name: global-macro-fin
+    restart: unless-stopped
+    ports:
+      - "8094:8094"
+    environment:
+      - PORT=8094
+      - FRED_API_KEY=${FRED_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - api-network  # 使用 api-gateway 的网络
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8094/api/macro/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+# 使用 api-gateway 的外部网络
+networks:
+  api-network:
+    external: true
+    name: api-gateway_api-network
