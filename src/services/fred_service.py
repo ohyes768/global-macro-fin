@@ -33,11 +33,6 @@ class FredService:
         Returns:
             数据系列
         """
-        # OECD 数据（德国、日本）是月度数据，自动扩展查询范围到 365 天
-        oecd_codes = {"IRLTLT01DEM156N", "IRLTLT01JPM156N"}
-        if code in oecd_codes:
-            start_date = (end_date - pd.Timedelta(days=365)).normalize()
-            logger.info(f"{code} 是 OECD 月度数据，自动扩展查询范围: {start_date} 到 {end_date}")
 
         logger.info(f"获取 FRED 数据: {code}, 从 {start_date} 到 {end_date}")
 
@@ -70,13 +65,51 @@ class FredService:
 
         for name, code in self.fred_codes.items():
             try:
-                # 对 OECD 数据使用更长的日期范围（365天）
-                if name in oecd_codes:
-                    oecd_start = (end_date - pd.Timedelta(days=365)).normalize()
-                    logger.info(f"{name} 是月度数据，扩大查询范围: {oecd_start} 到 {end_date}")
-                    series = await self.fetch_series(code, oecd_start, end_date)
-                else:
-                    series = await self.fetch_series(code, start_date, end_date)
+                # 只处理国债相关数据
+                if name not in oecd_codes and not name.startswith("us_"):
+                    continue
+                    
+                series = await self.fetch_series(code, start_date, end_date)
+                result[name] = series
+            except Exception as e:
+                logger.error(f"获取 {name} ({code}) 数据时出错: {e}")
+                # 创建空序列作为占位符
+                result[name] = pd.Series(dtype="float64")
+
+        return result
+
+    async def fetch_exchange_rates(
+        self, start_date: pd.Timestamp, end_date: pd.Timestamp
+    ) -> Dict[str, pd.Series]:
+        """获取所有汇率数据
+
+        Args:
+            start_date: 起始日期
+            end_date: 结束日期
+
+        Returns:
+            包含所有汇率数据的字典
+        """
+        result = {}
+
+        # 汇率数据代码
+        exchange_codes = {
+            "dollar_index": "DTWEXBGS",
+            "usd_cny": "DEXCHUS",
+            "usd_jpy": "DEXJPUS",
+            "usd_eur": "DEXUSEU",
+        }
+
+        for name, code in exchange_codes.items():
+            try:
+                logger.info(f"获取汇率数据: {name} ({code}), 从 {start_date} 到 {end_date}")
+                series = await self.fetch_series(code, start_date, end_date)
+                
+                # 对欧元汇率取倒数（FRED 提供的是 EUR/USD）
+                if name == "usd_eur":
+                    series = 1 / series
+                    logger.info(f"已将 EUR/USD 转换为 USD/EUR")
+                
                 result[name] = series
             except Exception as e:
                 logger.error(f"获取 {name} ({code}) 数据时出错: {e}")

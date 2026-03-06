@@ -24,6 +24,7 @@ class DataService:
             "us_treasuries": self.data_dir / "us_treasuries.csv",
             "eu_bonds": self.data_dir / "eu_bonds.csv",
             "jp_bonds": self.data_dir / "jp_bonds.csv",
+            "exchange_rates": self.data_dir / "exchange_rates.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -44,7 +45,7 @@ class DataService:
         """加载 CSV 数据
 
         Args:
-            data_type: 数据类型 (us_treasuries, eu_bonds, jp_bonds)
+            data_type: 数据类型 (us_treasuries, eu_bonds, jp_bonds, exchange_rates)
 
         Returns:
             数据 DataFrame
@@ -124,36 +125,136 @@ class DataService:
             return None
         return pd.Timestamp(data.index[-1]).normalize()
 
-    def save_fred_data(self, data: Dict[str, pd.Series]) -> None:
+    def save_fred_data(self, data: Dict[str, pd.Series], key: str = "auto") -> None:
         """保存 FRED 数据到对应的 CSV 文件
 
         Args:
             data: FRED 数据字典
+            key: 数据类型标识，"auto" 表示自动识别（默认），或指定具体类型
         """
-        # 保存美国国债数据
+        if key == "auto":
+            self._save_by_auto_detection(data)
+        elif key == "us_treasuries":
+            self._save_us_treasuries(data)
+        elif key == "eu_bonds":
+            self._save_eu_bonds(data)
+        elif key == "jp_bonds":
+            self._save_jp_bonds(data)
+        elif key == "exchange_rates":
+            self._save_exchange_rates(data)
+
+    def _save_by_auto_detection(self, data: Dict[str, pd.Series]) -> None:
+        """根据数据键名自动识别并保存到对应的 CSV 文件
+
+        Args:
+            data: FRED 数据字典
+        """
+        us_keys = ["us_3m", "us_2y", "us_10y"]
+        eu_keys = ["eu_10y", "eu_3m", "eu_2y", "eu_2y_ecb", "eu_5y"]
+        jp_keys = ["jp_10y", "jp_3m"]
+        exchange_keys = ["dollar_index", "usd_cny", "usd_jpy", "usd_eur"]
+
+        us_data = {k: v for k, v in data.items() if k in us_keys and not v.empty}
+        eu_data = {k: v for k, v in data.items() if k in eu_keys and not v.empty}
+        jp_data = {k: v for k, v in data.items() if k in jp_keys and not v.empty}
+        exchange_data = {k: v for k, v in data.items() if k in exchange_keys and not v.empty}
+
+        if us_data:
+            self._save_us_treasuries(us_data)
+        if eu_data:
+            self._save_eu_bonds(eu_data)
+        if jp_data:
+            self._save_jp_bonds(jp_data)
+        if exchange_data:
+            self._save_exchange_rates(exchange_data)
+
+    def _save_us_treasuries(self, data: Dict[str, pd.Series]) -> None:
+        """保存美国国债数据
+
+        Args:
+            data: 美债数据字典
+        """
         us_data = {}
-        for key in ["us_3m", "us_2y", "us_10y"]:
-            if key in data and not data[key].empty:
-                col_name = key.split("_")[1]  # 3m, 2y, 10y
-                us_data[col_name] = data[key]
+        for fred_key in ["us_3m", "us_2y", "us_10y"]:
+            if fred_key in data and not data[fred_key].empty:
+                col_name = fred_key.split("_")[1]
+                us_data[col_name] = data[fred_key]
 
         if us_data:
             us_df = pd.DataFrame(us_data)
             us_df.columns = ["美债3m", "美债2y", "美债10y"]
             self._ensure_file_exists(self.files["us_treasuries"], ["美债3m", "美债2y", "美债10y"])
             self.append_data("us_treasuries", us_df)
+            logger.info(f"已保存美债数据: {list(us_data.keys())}")
 
-        # 保存德债数据（德国10年期国债）
-        if "eu_10y" in data and not data["eu_10y"].empty:
-            eu_df = pd.DataFrame({"德债10y": data["eu_10y"]})
-            self._ensure_file_exists(self.files["eu_bonds"], ["德债10y"])
+    def _save_eu_bonds(self, data: Dict[str, pd.Series]) -> None:
+        """保存欧洲（德国）国债数据
+
+        Args:
+            data: 欧债数据字典
+        """
+        eu_data = {}
+        col_mapping = {
+            "eu_10y": "德债10y",
+            "eu_3m": "德债3m",
+            "eu_2y": "德债2y",
+            "eu_2y_ecb": "德债2y",
+            "eu_5y": "德债5y",
+        }
+        for fred_key in col_mapping:
+            if fred_key in data and not data[fred_key].empty:
+                eu_data[col_mapping[fred_key]] = data[fred_key]
+
+        if eu_data:
+            eu_df = pd.DataFrame(eu_data)
+            self._ensure_file_exists(self.files["eu_bonds"], list(eu_data.keys()))
             self.append_data("eu_bonds", eu_df)
+            logger.info(f"已保存欧债数据: {list(eu_data.keys())}")
 
-        # 保存日债数据
-        if "jp_10y" in data and not data["jp_10y"].empty:
-            jp_df = pd.DataFrame({"日债10y": data["jp_10y"]})
-            self._ensure_file_exists(self.files["jp_bonds"], ["日债10y"])
+    def _save_jp_bonds(self, data: Dict[str, pd.Series]) -> None:
+        """保存日本国债数据
+
+        Args:
+            data: 日债数据字典
+        """
+        jp_data = {}
+        col_mapping = {
+            "jp_10y": "日债10y",
+            "jp_3m": "日债3m",
+        }
+        for fred_key in col_mapping:
+            if fred_key in data and not data[fred_key].empty:
+                jp_data[col_mapping[fred_key]] = data[fred_key]
+
+        if jp_data:
+            jp_df = pd.DataFrame(jp_data)
+            self._ensure_file_exists(self.files["jp_bonds"], list(jp_data.keys()))
             self.append_data("jp_bonds", jp_df)
+            logger.info(f"已保存日债数据: {list(jp_data.keys())}")
+
+    def _save_exchange_rates(self, data: Dict[str, pd.Series]) -> None:
+        """保存汇率数据
+
+        Args:
+            data: 汇率数据字典
+        """
+        exchange_data = {}
+        exchange_mapping = {
+            "dollar_index": "美元指数",
+            "usd_cny": "美元人民币",
+            "usd_jpy": "美元日元",
+            "usd_eur": "美元欧元"
+        }
+
+        for fred_key, col_name in exchange_mapping.items():
+            if fred_key in data and not data[fred_key].empty:
+                exchange_data[col_name] = data[fred_key]
+
+        if exchange_data:
+            exchange_df = pd.DataFrame(exchange_data)
+            self._ensure_file_exists(self.files["exchange_rates"], ["美元指数", "美元人民币", "美元日元", "美元欧元"])
+            self.append_data("exchange_rates", exchange_df)
+            logger.info(f"已保存汇率数据: {list(exchange_data.keys())}")
 
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
@@ -178,7 +279,18 @@ class DataService:
         else:
             start_date = pd.Timestamp(start_date)
 
-        result = {"dates": [], "us_treasuries": {"3m": [], "2y": [], "10y": []}, "eu_10y": [], "jp_10y": []}
+        result = {
+            "dates": [],
+            "us_treasuries": {"3m": [], "2y": [], "10y": []},
+            "eu_treasuries": {"3m": [], "2y": [], "10y": []},
+            "jp_treasuries": {"10y": []},
+            "exchange_rates": {
+                "dollar_index": [],
+                "usd_cny": [],
+                "usd_jpy": [],
+                "usd_eur": []
+            }
+        }
 
         # 加载美国国债数据
         us_data = self.load_data("us_treasuries")
@@ -194,21 +306,63 @@ class DataService:
                 if new_col in us_filtered.columns:
                     result["us_treasuries"][old_col] = us_filtered[new_col].tolist()
 
-        # 加载德债数据
+        # 加载德债数据（月度数据，需要独立处理日期对齐）
         eu_data = self.load_data("eu_bonds")
         if not eu_data.empty:
             eu_data = eu_data.ffill()
             eu_filtered = eu_data[(eu_data.index >= start_date) & (eu_data.index <= end_date)]
-            if "德债10y" in eu_filtered.columns:
-                result["eu_10y"] = eu_filtered["德债10y"].tolist()
 
-        # 加载日债数据
+            # 德债列名映射到API格式
+            eu_col_mapping = {"德债3m": "3m", "德债2y": "2y", "德债10y": "10y"}
+
+            # 创建一个包含所有日期的完整日期范围用于对齐
+            target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+
+            # 处理每个期限的数据
+            for chinese_col, api_col in eu_col_mapping.items():
+                if chinese_col in eu_filtered.columns and not eu_filtered.empty:
+                    # 将月度数据对齐到美债的日期数组（前向填充）
+                    eu_full = eu_data.reindex(target_index, method="ffill")
+                    # 筛选时间范围
+                    eu_aligned = eu_full[(eu_full.index >= start_date) & (eu_full.index <= end_date)]
+                    result["eu_treasuries"][api_col] = eu_aligned[chinese_col].tolist()
+
+        # 加载日债数据（月度数据，需要独立处理日期对齐）
         jp_data = self.load_data("jp_bonds")
         if not jp_data.empty:
             jp_data = jp_data.ffill()
             jp_filtered = jp_data[(jp_data.index >= start_date) & (jp_data.index <= end_date)]
-            if "日债10y" in jp_filtered.columns:
-                result["jp_10y"] = jp_filtered["日债10y"].tolist()
+
+            # 日债列名映射（优先使用"日债10y"，如果没有再使用"日债 10y"）
+            jp_col = "日债10y" if "日债10y" in jp_filtered.columns else "日债 10y"
+
+            if jp_col in jp_filtered.columns and not jp_filtered.empty:
+                # 将月度数据对齐到美债的日期数组（前向填充）
+                # 先创建一个包含所有日期的完整日期范围
+                target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+                # 先将日债数据重新索引到完整日期范围，然后前向填充
+                jp_full = jp_data.reindex(target_index, method="ffill")
+                # 再筛选时间范围
+                jp_aligned = jp_full[(jp_full.index >= start_date) & (jp_full.index <= end_date)]
+                result["jp_treasuries"]["10y"] = jp_aligned[jp_col].tolist()
+
+        # 加载汇率数据
+        exchange_data = self.load_data("exchange_rates")
+        if not exchange_data.empty:
+            exchange_data = exchange_data.ffill()
+            exchange_filtered = exchange_data[(exchange_data.index >= start_date) & (exchange_data.index <= end_date)]
+
+            # 汇率数据列名映射
+            col_mapping = {
+                "美元指数": "dollar_index",
+                "美元人民币": "usd_cny",
+                "美元日元": "usd_jpy",
+                "美元欧元": "usd_eur"
+            }
+
+            for chinese_col, api_col in col_mapping.items():
+                if chinese_col in exchange_filtered.columns:
+                    result["exchange_rates"][api_col] = exchange_filtered[chinese_col].tolist()
 
         return result
 
