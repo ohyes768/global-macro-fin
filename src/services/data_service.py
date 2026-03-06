@@ -283,7 +283,7 @@ class DataService:
             "dates": [],
             "us_treasuries": {"3m": [], "2y": [], "10y": []},
             "eu_treasuries": {"3m": [], "2y": [], "10y": []},
-            "jp_treasuries": {"10y": []},
+            "jp_treasuries": {"3m": [], "2y": [], "10y": []},
             "exchange_rates": {
                 "dollar_index": [],
                 "usd_cny": [],
