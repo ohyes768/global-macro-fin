@@ -83,6 +83,19 @@ class ExchangeRatesUpdateData(BaseModel):
     exchange_rates: ExchangeRates
 
 
+class VIXData(BaseModel):
+    """VIX恐慌指数数据"""
+
+    date: date
+    value: Optional[float] = None
+
+
+class VIXUpdateData(BaseModel):
+    """VIX更新响应数据"""
+
+    vix: VIXData
+
+
 class MacroDataWithRates(BaseModel):
     """宏观经济数据（包含汇率）"""
 
@@ -90,6 +103,16 @@ class MacroDataWithRates(BaseModel):
     eu_treasuries: EUTreasuries
     jp_treasuries: JPTreasuries
     exchange_rates: ExchangeRates
+
+
+class MacroDataWithRatesAndVIX(BaseModel):
+    """宏观经济数据（包含汇率和VIX）"""
+
+    us_treasuries: USTreasuries
+    eu_treasuries: EUTreasuries
+    jp_treasuries: JPTreasuries
+    exchange_rates: ExchangeRates
+    vix: VIXData
 
 
 class UpdateResponse(BaseModel):
@@ -104,6 +127,8 @@ class UpdateResponse(BaseModel):
         | MacroData
         | ExchangeRatesUpdateData
         | MacroDataWithRates
+        | VIXUpdateData
+        | MacroDataWithRatesAndVIX
     ] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None

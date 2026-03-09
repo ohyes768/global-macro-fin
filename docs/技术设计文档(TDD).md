@@ -152,6 +152,26 @@ def get_last_date(data_type: str) -> Optional[Timestamp]
 - 统一错误处理
 - 类型安全的响应模型
 
+n#### 2.2.4 VIXService
+
+**职责**: 处理VIX恐慌指数数据
+
+**核心方法**:
+```python
+def convert_timezone(data: pd.Series) -> pd.Series
+    """转换时区（ET → UTC）"""
+
+def validate_data(data: pd.Series) -> pd.Series
+    """验证和清洗VIX数据"""
+
+def normalize_data(data: pd.Series) -> pd.Series
+    """标准化VIX数据格式"""
+```
+
+**关键特性**:
+- VIX数据时区转换（ET → UTC）
+- 异常值检测（VIX > 100 或 < 0）
+- 前向填充非交易日数据
 ---
 
 ## 3. 数据模型设计
@@ -278,6 +298,35 @@ class UpdateResponse(BaseModel):
   - 技术方案: 新增 USTreasuriesUpdateData 模型
   - 支持联合类型: `USTreasuriesUpdateData | MacroData`
 
+n### 2026-03-08 - v1.1.0
+
+#### 新增功能
+- **新增VIX恐慌指数数据模块**
+  - 代码位置: `src/services/vix_service.py`
+  - 技术方案: 独立的VIX服务模块，负责时区转换、数据验证和格式标准化
+
+- **新增VIX历史数据获取接口**
+  - 代码位置: `src/api/routes.py:fetch_vix_history()`
+  - 接口路径: `POST /api/macro/fetch/vix/history`
+  - 技术方案: 从FRED API获取VIXCLS序列，从2000年开始获取全部历史数据
+
+- **新增VIX增量更新接口**
+  - 代码位置: `src/api/routes.py:update_vix()`
+  - 接口路径: `POST /api/macro/update/vix`
+  - 技术方案: 获取最近7天VIX数据并追加到本地存储
+
+#### 优化改进
+- **数据查询接口扩展**
+  - 代码位置: `src/services/data_service.py:query_data()`
+  - 技术方案: 返回数据中包含VIX指数数组
+
+- **健康检查接口扩展**
+  - 代码位置: `src/api/routes.py:health_check()`
+  - 技术方案: 健康检查返回VIX数据的最后更新时间
+
+- **新增数据模型**
+  - 代码位置: `src/models.py`
+  - 技术方案: 新增VIXData和VIXUpdateData模型
 ---
 
 ## 6. 数据流设计

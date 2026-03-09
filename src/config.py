@@ -36,6 +36,8 @@ class Settings(BaseSettings):
         "usd_cny": "DEXCHUS",          # 美元兑人民币
         "usd_jpy": "DEXJPUS",          # 美元兑日元
         "usd_eur": "DEXUSEU",          # 美元兑欧元
+        # VIX恐慌指数
+        "vix": "VIXCLS",               # CBOE波动率指数
     }
 
 

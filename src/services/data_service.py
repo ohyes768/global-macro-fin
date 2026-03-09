@@ -24,7 +24,8 @@ class DataService:
             "us_treasuries": self.data_dir / "us_treasuries.csv",
             "eu_bonds": self.data_dir / "eu_bonds.csv",
             "jp_bonds": self.data_dir / "jp_bonds.csv",
-            "exchange_rates": self.data_dir / "exchange_rates.csv"
+            "exchange_rates": self.data_dir / "exchange_rates.csv",
+            "vix": self.data_dir / "vix.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -45,7 +46,7 @@ class DataService:
         """加载 CSV 数据
 
         Args:
-            data_type: 数据类型 (us_treasuries, eu_bonds, jp_bonds, exchange_rates)
+            data_type: 数据类型 (us_treasuries, eu_bonds, jp_bonds, exchange_rates, vix)
 
         Returns:
             数据 DataFrame
@@ -142,6 +143,8 @@ class DataService:
             self._save_jp_bonds(data)
         elif key == "exchange_rates":
             self._save_exchange_rates(data)
+        elif key == "vix":
+            self._save_vix(data)
 
     def _save_by_auto_detection(self, data: Dict[str, pd.Series]) -> None:
         """根据数据键名自动识别并保存到对应的 CSV 文件
@@ -153,11 +156,13 @@ class DataService:
         eu_keys = ["eu_10y", "eu_3m", "eu_2y", "eu_2y_ecb", "eu_5y"]
         jp_keys = ["jp_10y", "jp_3m"]
         exchange_keys = ["dollar_index", "usd_cny", "usd_jpy", "usd_eur"]
+        vix_keys = ["vix"]
 
         us_data = {k: v for k, v in data.items() if k in us_keys and not v.empty}
         eu_data = {k: v for k, v in data.items() if k in eu_keys and not v.empty}
         jp_data = {k: v for k, v in data.items() if k in jp_keys and not v.empty}
         exchange_data = {k: v for k, v in data.items() if k in exchange_keys and not v.empty}
+        vix_data = {k: v for k, v in data.items() if k in vix_keys and not v.empty}
 
         if us_data:
             self._save_us_treasuries(us_data)
@@ -167,6 +172,8 @@ class DataService:
             self._save_jp_bonds(jp_data)
         if exchange_data:
             self._save_exchange_rates(exchange_data)
+        if vix_data:
+            self._save_vix(vix_data)
 
     def _save_us_treasuries(self, data: Dict[str, pd.Series]) -> None:
         """保存美国国债数据
@@ -256,6 +263,22 @@ class DataService:
             self.append_data("exchange_rates", exchange_df)
             logger.info(f"已保存汇率数据: {list(exchange_data.keys())}")
 
+    def _save_vix(self, data: Dict[str, pd.Series]) -> None:
+        """保存VIX数据
+
+        Args:
+            data: VIX数据字典
+        """
+        if "vix" not in data or data["vix"].empty:
+            logger.warning("VIX数据为空，跳过保存")
+            return
+
+        vix_df = pd.DataFrame({"Close_VIX": data["vix"]})
+        vix_df.index.name = "date"
+        self._ensure_file_exists(self.files["vix"], ["Close_VIX"])
+        self.append_data("vix", vix_df)
+        logger.info(f"已保存VIX数据，共 {len(vix_df)} 条记录")
+
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> Dict:
@@ -289,7 +312,8 @@ class DataService:
                 "usd_cny": [],
                 "usd_jpy": [],
                 "usd_eur": []
-            }
+            },
+            "vix": []
         }
 
         # 加载美国国债数据
@@ -363,6 +387,19 @@ class DataService:
             for chinese_col, api_col in col_mapping.items():
                 if chinese_col in exchange_filtered.columns:
                     result["exchange_rates"][api_col] = exchange_filtered[chinese_col].tolist()
+
+        # 加载VIX数据
+        vix_data = self.load_data("vix")
+        if not vix_data.empty:
+            vix_data = vix_data.ffill()
+            vix_filtered = vix_data[(vix_data.index >= start_date) & (vix_data.index <= end_date)]
+
+            # 将VIX数据对齐到美债的日期数组（前向填充）
+            if "Close_VIX" in vix_filtered.columns and not vix_filtered.empty:
+                target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+                vix_full = vix_data.reindex(target_index, method="ffill")
+                vix_aligned = vix_full[(vix_full.index >= start_date) & (vix_full.index <= end_date)]
+                result["vix"] = vix_aligned["Close_VIX"].tolist()
 
         return result
 

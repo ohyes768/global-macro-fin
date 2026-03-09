@@ -348,6 +348,7 @@
 | 欧洲国债 | 3 个月、2 年、10 年 | 日级 | 德国国债收益率曲线 |
 | 日本国债 | 10 年 | 日级 | 日本 10 年期国债收益率（注） |
 | 汇率数据 | 美元指数、USD/CNY、USD/JPY、USD/EUR | 日级 | 主要货币汇率 |
+| VIX恐慌指数 | VIXCLS | 日级 | CBOE波动率指数 |
 
 > **注**: 日本国债目前仅实现 10 年期数据。响应数据结构中保留 `3m` 和 `2y` 字段但返回空数组，待后续补充数据源。
 
@@ -777,6 +778,63 @@ n8n 调用此接口触发数据更新（美债 + 欧债 + 日债 + 汇率）。
 }
 ```
 
+n---
+
+### 13. 获取VIX历史数据
+
+从 2000 年开始获取全部 VIX 恐慌指数历史数据。
+
+**请求**
+
+| 属性 | 值 |
+|------|-----|
+| 方法 | POST |
+| 路径 | `/api/macro/fetch/vix/history` |
+
+**响应**
+
+```json
+{
+  "success": true,
+  "message": "VIX历史数据获取成功",
+  "updated_at": "2026-03-08T12:00:00Z",
+  "data": {
+    "vix": {
+      "date": "2026-03-08",
+      "value": 18.52
+    }
+  }
+}
+```
+
+---
+
+### 14. 增量更新VIX数据
+
+增量更新最近 7 天的 VIX 恐慌指数数据。
+
+**请求**
+
+| 属性 | 值 |
+|------|-----|
+| 方法 | POST |
+| 路径 | `/api/macro/update/vix` |
+
+**响应**
+
+```json
+{
+  "success": true,
+  "message": "VIX数据增量更新成功",
+  "updated_at": "2026-03-08T12:00:00Z",
+  "data": {
+    "vix": {
+      "date": "2026-03-08",
+      "value": 18.52
+    }
+  }
+}
+```
 ---
 
 ## 数据模型
@@ -848,6 +906,7 @@ interface UpdateResponse {
     jp_treasuries?: JPTreasuries;
     exchange_rates?: ExchangeRates;
   };
+    vix?: VIXData;
   updated_at?: string;   // ISO 8601 格式
   error_code?: string;
 }
@@ -877,11 +936,29 @@ interface DataResponse {
       usd_jpy: ExchangeRateData[];
       usd_eur: ExchangeRateData[];
     };
+    };
+    vix?: number[];
   };
   error_code?: string;
 }
 ```
 
+n### VIX恐慌指数数据 (VIXData)
+
+```typescript
+interface VIXData {
+  date: string;           // YYYY-MM-DD
+  value: number | null;   // VIX指数值
+}
+```
+
+### VIX更新响应数据 (VIXUpdateData)
+
+```typescript
+interface VIXUpdateData {
+  vix: VIXData;
+}
+```
 ### 健康检查响应 (HealthResponse)
 
 ```typescript
@@ -921,3 +998,5 @@ interface HealthResponse {
 | | 10 | `/api/macro/fetch/jp-bonds/history` | POST | 获取日债历史数据 |
 | | 11 | `/api/macro/update/jp-bonds` | POST | 增量更新日债 |
 | | 12 | `/api/macro/data` | GET | 查询宏观经济数据 |
+| | 13 | `/api/macro/fetch/vix/history` | POST | 获取VIX历史数据 |
+| | 14 | `/api/macro/update/vix` | POST | 增量更新VIX |

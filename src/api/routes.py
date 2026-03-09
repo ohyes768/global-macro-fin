@@ -11,6 +11,7 @@ from src.models import (
     HealthResponse,
     MacroData,
     MacroDataWithRates,
+    MacroDataWithRatesAndVIX,
     TreasuryData,
     USTreasuries,
     EUTreasuries,
@@ -21,10 +22,13 @@ from src.models import (
     ExchangeRateData,
     ExchangeRates,
     ExchangeRatesUpdateData,
+    VIXData,
+    VIXUpdateData,
 )
 from src.services.fred_service import get_fred_service
 from src.services.ecb_service import get_ecb_service
 from src.services.data_service import get_data_service
+from src.services.vix_service import get_vix_service
 from src.utils.logger import setup_logger
 from src.config import get_settings
 
@@ -905,7 +909,7 @@ async def health_check():
 
         # 获取最后更新时间
         last_updates = {}
-        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates"]:
+        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix"]:
             last_date = data_service.get_last_date(data_type)
             if last_date:
                 last_updates[data_type] = last_date.strftime("%Y-%m-%d")
@@ -930,3 +934,141 @@ async def health_check():
             version="1.0.0",
             last_update=None,
         )
+
+
+@router.post("/fetch/vix/history", response_model=UpdateResponse)
+async def fetch_vix_history():
+    """获取VIX历史数据接口 - 从 2000 年开始获取全部历史数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取VIX历史数据...")
+        fred_service = get_fred_service()
+        vix_service = get_vix_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = pd.Timestamp(settings.historical_start_date)
+
+        logger.info(f"获取VIX历史数据，从 {start_date} 到 {latest_end}")
+
+        # 获取VIX数据
+        vix_code = settings.fred_codes.get("vix", "VIXCLS")
+        vix_series = await fred_service.fetch_series(vix_code, start_date, latest_end)
+
+        if vix_series.empty:
+            raise Exception("未能获取到任何VIX数据")
+
+        # 处理VIX数据：时区转换、验证、标准化
+        vix_series = vix_service.convert_timezone(vix_series)
+        vix_series = vix_service.validate_data(vix_series)
+        vix_series = vix_service.normalize_data(vix_series)
+
+        # 保存VIX数据
+        vix_data = {"vix": vix_series}
+        data_service.save_fred_data(vix_data, key="vix")
+
+        # 构建响应数据
+        last_idx = vix_series.last_valid_index()
+        vix_latest = VIXData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(vix_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = VIXUpdateData(vix=vix_latest)
+
+        logger.info("VIX历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="VIX历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取VIX历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取VIX历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/vix", response_model=UpdateResponse)
+async def update_vix():
+    """更新VIX数据接口 - 增量更新最近 7 天的数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新VIX数据...")
+        fred_service = get_fred_service()
+        vix_service = get_vix_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新VIX数据，从 {start_date} 到 {latest_end}")
+
+        # 获取VIX数据
+        vix_code = settings.fred_codes.get("vix", "VIXCLS")
+        vix_series = await fred_service.fetch_series(vix_code, start_date, latest_end)
+
+        if vix_series.empty:
+            raise Exception("未能获取到任何VIX新数据")
+
+        # 处理VIX数据：时区转换、验证、标准化
+        vix_series = vix_service.convert_timezone(vix_series)
+        vix_series = vix_service.validate_data(vix_series)
+        vix_series = vix_service.normalize_data(vix_series)
+
+        # 保存VIX数据
+        vix_data = {"vix": vix_series}
+        data_service.save_fred_data(vix_data, key="vix")
+
+        # 构建响应数据
+        last_idx = vix_series.last_valid_index()
+        vix_latest = VIXData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(vix_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = VIXUpdateData(vix=vix_latest)
+
+        logger.info("VIX数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="VIX数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"VIX数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"VIX数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
