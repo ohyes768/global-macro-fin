@@ -10,7 +10,7 @@ COPY pyproject.toml ./
 
 # 创建虚拟环境并安装依赖
 RUN uv venv .venv
-RUN .venv/bin/pip install --no-cache-dir -e .
+RUN uv pip install --no-cache-dir -e .
 
 # 复制源代码
 COPY src/ ./src/
