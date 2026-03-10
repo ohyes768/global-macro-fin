@@ -30,8 +30,8 @@ class EUTreasuries(BaseModel):
 class JPTreasuries(BaseModel):
     """日本国债数据"""
 
-    m3: TreasuryData
-    y2: TreasuryData
+    m3: Optional[TreasuryData] = None
+    y2: Optional[TreasuryData] = None
     y10: TreasuryData
 
 
