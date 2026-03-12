@@ -35,7 +35,7 @@ from src.config import get_settings
 logger = setup_logger("api_routes")
 settings = get_settings()
 
-router = APIRouter(prefix="/api/macro", tags=["macro"])
+router = APIRouter(prefix="/api", tags=["macro"])
 
 # 并发控制锁
 _update_lock = None
