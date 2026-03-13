@@ -349,6 +349,7 @@
 | 日本国债 | 10 年 | 日级 | 日本 10 年期国债收益率（注） |
 | 汇率数据 | 美元指数、USD/CNY、USD/JPY、USD/EUR | 日级 | 主要货币汇率 |
 | VIX恐慌指数 | VIXCLS | 日级 | CBOE波动率指数 |
+| 资金流向 | 北向资金、南向资金 | 日级 | 沪深港通资金流向 |
 
 > **注**: 日本国债目前仅实现 10 年期数据。响应数据结构中保留 `3m` 和 `2y` 字段但返回空数组，待后续补充数据源。
 
@@ -773,6 +774,14 @@ n8n 调用此接口触发数据更新（美债 + 欧债 + 日债 + 汇率）。
         {"date": "2026-03-01", "value": 0.91},
         {"date": "2026-03-02", "value": 0.92}
       ]
+    },
+    "fund_flow": {
+      "north_net_flow": [45.2, 52.3],
+      "north_buy": [145.5, 158.5],
+      "north_sell": [100.3, 106.2],
+      "south_net_flow": [15.5, 18.7],
+      "south_buy": [80.2, 85.3],
+      "south_sell": [64.7, 66.6]
     }
   }
 }
@@ -835,6 +844,125 @@ n---
   }
 }
 ```
+
+---
+
+### 15. 获取资金流向历史数据
+
+从 2014-11-17（沪港通开通日）开始获取全部资金流向历史数据。
+
+**请求**
+
+| 属性 | 值 |
+|------|-----|
+| 方法 | POST |
+| 路径 | `/api/macro/fetch/fund-flow/history` |
+
+**响应**
+
+```json
+{
+  "success": true,
+  "message": "资金流向历史数据获取成功",
+  "updated_at": "2026-03-12T12:00:00Z",
+  "data": {
+    "fund_flow": {
+      "north": {
+        "date": "2026-03-12",
+        "net_flow": 52.3,
+        "buy": 158.5,
+        "sell": 106.2
+      },
+      "south": {
+        "date": "2026-03-12",
+        "net_flow": 18.7,
+        "buy": 85.3,
+        "sell": 66.6
+      }
+    }
+  }
+}
+```
+
+---
+
+### 16. 增量更新资金流向数据
+
+增量更新最近 7 天的资金流向数据。
+
+**请求**
+
+| 属性 | 值 |
+|------|-----|
+| 方法 | POST |
+| 路径 | `/api/macro/update/fund-flow` |
+
+**响应**
+
+```json
+{
+  "success": true,
+  "message": "资金流向数据增量更新成功",
+  "updated_at": "2026-03-12T12:00:00Z",
+  "data": {
+    "fund_flow": {
+      "north": {
+        "date": "2026-03-12",
+        "net_flow": 52.3,
+        "buy": 158.5,
+        "sell": 106.2
+      },
+      "south": {
+        "date": "2026-03-12",
+        "net_flow": 18.7,
+        "buy": 85.3,
+        "sell": 66.6
+      }
+    }
+  }
+}
+```
+
+---
+
+### 17. 获取资金流向累计数据
+
+获取北向/南向资金的 7 日和 30 日累计净流入。
+
+**请求**
+
+| 属性 | 值 |
+|------|-----|
+| 方法 | GET |
+| 路径 | `/api/macro/fund-flow/cumulative` |
+
+**响应**
+
+```json
+{
+  "north_cumulative": {
+    "date": "2026-03-12",
+    "cum_7d": 325.5,
+    "cum_30d": 1250.8
+  },
+  "south_cumulative": {
+    "date": "2026-03-12",
+    "cum_7d": 112.3,
+    "cum_30d": 450.6
+  }
+}
+```
+
+**字段说明**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| north_cumulative | object | 北向资金累计数据 |
+| south_cumulative | object | 南向资金累计数据 |
+| date | string | 计算截止日期（YYYY-MM-DD） |
+| cum_7d | number | 7 日累计净流入（亿元） |
+| cum_30d | number | 30 日累计净流入（亿元） |
+
 ---
 
 ## 数据模型
@@ -959,6 +1087,54 @@ interface VIXUpdateData {
   vix: VIXData;
 }
 ```
+
+### 资金流向数据 (FundFlowData)
+
+```typescript
+interface FundFlowData {
+  date: string;           // YYYY-MM-DD
+  net_flow: number;       // 净流入（亿元）
+  buy: number;            // 买入额（亿元）
+  sell: number;           // 卖出额（亿元）
+}
+```
+
+### 资金流向 (FundFlow)
+
+```typescript
+interface FundFlow {
+  north: FundFlowData;    // 北向资金
+  south: FundFlowData;    // 南向资金
+}
+```
+
+### 资金流向更新响应数据 (FundFlowUpdateData)
+
+```typescript
+interface FundFlowUpdateData {
+  fund_flow: FundFlow;
+}
+```
+
+### 资金流向累计数据 (FundFlowCumulativeData)
+
+```typescript
+interface FundFlowCumulativeData {
+  date: string;           // YYYY-MM-DD
+  cum_7d: number | null;  // 7 日累计净流入（亿元）
+  cum_30d: number | null; // 30 日累计净流入（亿元）
+}
+```
+
+### 资金流向累计响应 (FundFlowCumulativeResponse)
+
+```typescript
+interface FundFlowCumulativeResponse {
+  north_cumulative: FundFlowCumulativeData;
+  south_cumulative: FundFlowCumulativeData;
+}
+```
+
 ### 健康检查响应 (HealthResponse)
 
 ```typescript
@@ -1000,3 +1176,6 @@ interface HealthResponse {
 | | 12 | `/api/macro/data` | GET | 查询宏观经济数据 |
 | | 13 | `/api/macro/fetch/vix/history` | POST | 获取VIX历史数据 |
 | | 14 | `/api/macro/update/vix` | POST | 增量更新VIX |
+| | 15 | `/api/macro/fetch/fund-flow/history` | POST | 获取资金流向历史数据 |
+| | 16 | `/api/macro/update/fund-flow` | POST | 增量更新资金流向 |
+| | 17 | `/api/macro/fund-flow/cumulative` | GET | 获取资金流向累计数据 |

@@ -96,6 +96,70 @@ class VIXUpdateData(BaseModel):
     vix: VIXData
 
 
+class FundFlowData(BaseModel):
+    """资金流向数据"""
+
+    date: date
+    net_flow: Optional[float] = None  # 净流入（亿元）
+    buy: Optional[float] = None       # 买入额（亿元）
+    sell: Optional[float] = None      # 卖出额（亿元）
+
+
+class FundFlow(BaseModel):
+    """资金流向"""
+
+    north: FundFlowData  # 北向资金（港股通→A股）
+    south: FundFlowData  # 南向资金（A股→港股通）
+
+
+class FundFlowCumulativeData(BaseModel):
+    """资金流向累计数据"""
+
+    date: date
+    cum_7d: Optional[float] = None  # 7日累计净流入（亿元）
+    cum_30d: Optional[float] = None  # 30日累计净流入（亿元）
+
+
+class FundFlowWithCumulative(BaseModel):
+    """资金流向（包含累计数据）"""
+
+    north: FundFlowData  # 北向资金（港股通→A股）
+    south: FundFlowData  # 南向资金（A股→港股通）
+    north_cumulative: FundFlowCumulativeData  # 北向资金累计数据
+    south_cumulative: FundFlowCumulativeData  # 南向资金累计数据
+
+
+class FundFlowUpdateData(BaseModel):
+    """资金流向更新响应数据"""
+
+    fund_flow: FundFlow
+
+
+class FundFlowCumulativeResponse(BaseModel):
+    """资金流向累计数据响应"""
+
+    north_cumulative: FundFlowCumulativeData  # 北向资金累计数据
+    south_cumulative: FundFlowCumulativeData  # 南向资金累计数据
+
+
+class FundFlowHistoryItem(BaseModel):
+    """资金流向历史数据项"""
+
+    date: str
+    north_net: Optional[float] = None    # 北向净流入
+    north_buy: Optional[float] = None    # 北向买入
+    north_sell: Optional[float] = None   # 北向卖出
+    south_net: Optional[float] = None    # 南向净流入
+    south_buy: Optional[float] = None    # 南向买入
+    south_sell: Optional[float] = None   # 南向卖出
+
+
+class FundFlowHistoryResponse(BaseModel):
+    """资金流向历史数据响应"""
+
+    data: List[FundFlowHistoryItem]
+
+
 class MacroDataWithRates(BaseModel):
     """宏观经济数据（包含汇率）"""
 
@@ -129,6 +193,7 @@ class UpdateResponse(BaseModel):
         | MacroDataWithRates
         | VIXUpdateData
         | MacroDataWithRatesAndVIX
+        | FundFlowUpdateData
     ] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None

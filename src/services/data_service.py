@@ -25,7 +25,8 @@ class DataService:
             "eu_bonds": self.data_dir / "eu_bonds.csv",
             "jp_bonds": self.data_dir / "jp_bonds.csv",
             "exchange_rates": self.data_dir / "exchange_rates.csv",
-            "vix": self.data_dir / "vix.csv"
+            "vix": self.data_dir / "vix.csv",
+            "fund_flow": self.data_dir / "fund_flow.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -279,6 +280,62 @@ class DataService:
         self.append_data("vix", vix_df)
         logger.info(f"已保存VIX数据，共 {len(vix_df)} 条记录")
 
+    def save_fund_flow(self, data: Dict[str, pd.DataFrame]) -> None:
+        """保存资金流向数据
+
+        Args:
+            data: 资金流向数据字典，包含 'north' 和 'south' 两个 DataFrame
+        """
+        if not data:
+            logger.warning("资金流向数据为空，跳过保存")
+            return
+
+        # 合并北向和南向资金流向数据
+        fund_flow_list = []
+        columns = []
+
+        if "north" in data and not data["north"].empty:
+            north_df = data["north"].copy()
+            north_df.columns = ["北向净流入", "北向买入", "北向卖出"]
+            fund_flow_list.append(north_df)
+            if not columns:
+                columns = north_df.columns.tolist()
+
+        if "south" in data and not data["south"].empty:
+            south_df = data["south"].copy()
+            south_df.columns = ["南向净流入", "南向买入", "南向卖出"]
+            fund_flow_list.append(south_df)
+            if not columns:
+                columns = south_df.columns.tolist()
+            else:
+                columns.extend(south_df.columns.tolist())
+
+        if not fund_flow_list:
+            logger.warning("资金流向数据为空，跳过保存")
+            return
+
+        # 按日期合并北向和南向数据
+        fund_flow_df = pd.concat(fund_flow_list, axis=1)
+
+        # 设置索引名称
+        fund_flow_df.index.name = "date"
+
+        # 确保所有必要的列都存在
+        all_columns = ["北向净流入", "北向买入", "北向卖出", "南向净流入", "南向买入", "南向卖出"]
+        for col in all_columns:
+            if col not in fund_flow_df.columns:
+                fund_flow_df[col] = None
+
+        # 只保留需要的列
+        fund_flow_df = fund_flow_df[all_columns]
+
+        # 确保文件存在
+        self._ensure_file_exists(self.files["fund_flow"], all_columns)
+
+        # 保存数据
+        self.append_data("fund_flow", fund_flow_df)
+        logger.info(f"已保存资金流向数据，共 {len(fund_flow_df)} 条记录")
+
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> Dict:
@@ -313,7 +370,15 @@ class DataService:
                 "usd_jpy": [],
                 "usd_eur": []
             },
-            "vix": []
+            "vix": [],
+            "fund_flow": {
+                "north_net_flow": [],
+                "north_buy": [],
+                "north_sell": [],
+                "south_net_flow": [],
+                "south_buy": [],
+                "south_sell": []
+            }
         }
 
         # 加载美国国债数据
@@ -400,6 +465,31 @@ class DataService:
                 vix_full = vix_data.reindex(target_index, method="ffill")
                 vix_aligned = vix_full[(vix_full.index >= start_date) & (vix_full.index <= end_date)]
                 result["vix"] = vix_aligned["Close_VIX"].tolist()
+
+        # 加载资金流向数据
+        fund_flow_data = self.load_data("fund_flow")
+        if not fund_flow_data.empty:
+            fund_flow_data = fund_flow_data.ffill()
+            fund_flow_filtered = fund_flow_data[(fund_flow_data.index >= start_date) & (fund_flow_data.index <= end_date)]
+
+            # 资金流向数据列名映射
+            col_mapping = {
+                "北向净流入": "north_net_flow",
+                "北向买入": "north_buy",
+                "北向卖出": "north_sell",
+                "南向净流入": "south_net_flow",
+                "南向买入": "south_buy",
+                "南向卖出": "south_sell"
+            }
+
+            # 将资金流向数据对齐到美债的日期数组（前向填充）
+            target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+            fund_flow_full = fund_flow_data.reindex(target_index, method="ffill")
+            fund_flow_aligned = fund_flow_full[(fund_flow_full.index >= start_date) & (fund_flow_full.index <= end_date)]
+
+            for chinese_col, api_col in col_mapping.items():
+                if chinese_col in fund_flow_aligned.columns:
+                    result["fund_flow"][api_col] = fund_flow_aligned[chinese_col].tolist()
 
         return result
 

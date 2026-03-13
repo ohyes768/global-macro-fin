@@ -52,6 +52,9 @@ class Settings(BaseSettings):
         "eu_10y_ecb": "FM/M.U2.EUR.4F.BB.U2_10Y.YLD", # 欧元区10年期 -> 德国Bund近似
     }
 
+    # 资金流向数据起始日期（沪港通开通日）
+    fund_flow_start_date: str = "2014-11-17"
+
     class Config:
         env_file = ".env"
         case_sensitive = False
