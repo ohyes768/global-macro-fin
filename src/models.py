@@ -194,6 +194,8 @@ class UpdateResponse(BaseModel):
         | VIXUpdateData
         | MacroDataWithRatesAndVIX
         | FundFlowUpdateData
+        | ChinaBondUpdateData
+        | TedSpreadUpdateData
     ] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None
@@ -215,3 +217,31 @@ class HealthResponse(BaseModel):
     service: str
     version: str
     last_update: Optional[str] = None
+
+
+class ChinaBondData(BaseModel):
+    """中国国债数据"""
+
+    date: date
+    value: Optional[float] = None  # 10年期国债收益率（%）
+
+
+class ChinaBondUpdateData(BaseModel):
+    """中国国债更新响应数据"""
+
+    china_bond_10y: ChinaBondData
+
+
+class TedSpreadData(BaseModel):
+    """TED利差数据"""
+
+    date: date
+    sofr: Optional[float] = None    # SOFR 利率（%）
+    us_3m: Optional[float] = None   # 美国3个月国债收益率（%）
+    ted_spread: Optional[float] = None  # TED利差 = SOFR - DGS3MO（%）
+
+
+class TedSpreadUpdateData(BaseModel):
+    """TED利差更新响应数据"""
+
+    ted_spread: TedSpreadData

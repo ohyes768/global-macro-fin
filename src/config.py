@@ -38,6 +38,8 @@ class Settings(BaseSettings):
         "usd_eur": "DEXUSEU",          # 美元兑欧元
         # VIX恐慌指数
         "vix": "VIXCLS",               # CBOE波动率指数
+        # SOFR（担保隔夜融资利率）
+        "sofr": "SOFR",                # 纽约联储银行
     }
 
 
@@ -54,6 +56,9 @@ class Settings(BaseSettings):
 
     # 资金流向数据起始日期（沪港通开通日）
     fund_flow_start_date: str = "2014-11-17"
+
+    # 中国国债数据起始日期
+    china_bond_start_date: str = "2000-01-01"
 
     class Config:
         env_file = ".env"

@@ -26,7 +26,9 @@ class DataService:
             "jp_bonds": self.data_dir / "jp_bonds.csv",
             "exchange_rates": self.data_dir / "exchange_rates.csv",
             "vix": self.data_dir / "vix.csv",
-            "fund_flow": self.data_dir / "fund_flow.csv"
+            "fund_flow": self.data_dir / "fund_flow.csv",
+            "china_bond": self.data_dir / "china_bond.csv",
+            "ted_spread": self.data_dir / "ted_spread.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -280,6 +282,70 @@ class DataService:
         self.append_data("vix", vix_df)
         logger.info(f"已保存VIX数据，共 {len(vix_df)} 条记录")
 
+    def _save_china_bond(self, data: Dict[str, pd.Series]) -> None:
+        """保存中国国债数据
+
+        Args:
+            data: 中国国债数据字典
+        """
+        if not data or all(v.empty for v in data.values()):
+            logger.warning("中国国债数据为空，跳过保存")
+            return
+
+        # 合并所有中国国债数据
+        china_df = pd.DataFrame(data)
+        china_df.columns = [f"中国{c}" for c in china_df.columns]
+        china_df.index.name = "date"
+
+        self._ensure_file_exists(self.files["china_bond"], list(china_df.columns))
+        self.append_data("china_bond", china_df)
+        logger.info(f"已保存中国国债数据，共 {len(china_df)} 条记录")
+
+    def save_china_bond_data(self, data: Dict[str, pd.Series]) -> None:
+        """保存中国国债数据
+
+        Args:
+            data: 中国国债数据字典
+        """
+        self._save_china_bond(data)
+
+    def _save_ted_spread(self, data: Dict[str, pd.Series]) -> None:
+        """保存TED利差数据
+
+        Args:
+            data: TED利差数据字典（包含 sofr, us_3m, ted_spread）
+        """
+        if not data or all(v.empty for v in data.values()):
+            logger.warning("TED利差数据为空，跳过保存")
+            return
+
+        ted_df = pd.DataFrame(data)
+        ted_df.columns = ["SOFR", "美债3m", "TED利差"]
+        ted_df.index.name = "date"
+
+        self._ensure_file_exists(self.files["ted_spread"], list(ted_df.columns))
+        self.append_data("ted_spread", ted_df)
+        logger.info(f"已保存TED利差数据，共 {len(ted_df)} 条记录")
+
+    def save_ted_spread_data(self, sofr: pd.Series, us_3m: pd.Series) -> None:
+        """保存TED利差数据
+
+        Args:
+            sofr: SOFR 数据
+            us_3m: 美国3个月国债收益率数据
+        """
+        # 计算 TED 利差
+        # 确保索引对齐
+        sofr_aligned = sofr.reindex(us_3m.index, method="ffill")
+        ted_spread = sofr_aligned - us_3m
+
+        data = {
+            "sofr": sofr_aligned,
+            "us_3m": us_3m,
+            "ted_spread": ted_spread
+        }
+        self._save_ted_spread(data)
+
     def save_fund_flow(self, data: Dict[str, pd.DataFrame]) -> None:
         """保存资金流向数据
 
@@ -378,6 +444,14 @@ class DataService:
                 "south_net_flow": [],
                 "south_buy": [],
                 "south_sell": []
+            },
+            "china_bond": {
+                "10y": []
+            },
+            "ted_spread": {
+                "sofr": [],
+                "us_3m": [],
+                "ted_spread": []
             }
         }
 
@@ -490,6 +564,53 @@ class DataService:
             for chinese_col, api_col in col_mapping.items():
                 if chinese_col in fund_flow_aligned.columns:
                     result["fund_flow"][api_col] = fund_flow_aligned[chinese_col].tolist()
+
+        # 加载中国国债数据
+        china_bond_data = self.load_data("china_bond")
+        if not china_bond_data.empty:
+            china_bond_data = china_bond_data.ffill()
+            china_bond_filtered = china_bond_data[(china_bond_data.index >= start_date) & (china_bond_data.index <= end_date)]
+
+            # 查找10年期国债收益率列
+            col_10y = None
+            for col in china_bond_data.columns:
+                col_str = str(col).lower()
+                if "10y" in col_str or "10年" in col_str:
+                    col_10y = col
+                    break
+
+            if col_10y is None and not china_bond_data.empty:
+                # 默认使用第一列
+                col_10y = china_bond_data.columns[0]
+
+            if col_10y:
+                # 将中国国债数据对齐到美债的日期数组（前向填充）
+                target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+                china_bond_full = china_bond_data.reindex(target_index, method="ffill")
+                china_bond_aligned = china_bond_full[(china_bond_full.index >= start_date) & (china_bond_full.index <= end_date)]
+                result["china_bond"]["10y"] = china_bond_aligned[col_10y].tolist()
+
+        # 加载TED利差数据
+        ted_data = self.load_data("ted_spread")
+        if not ted_data.empty:
+            ted_data = ted_data.ffill()
+            ted_filtered = ted_data[(ted_data.index >= start_date) & (ted_data.index <= end_date)]
+
+            # TED利差列名映射
+            col_mapping = {
+                "SOFR": "sofr",
+                "美债3m": "us_3m",
+                "TED利差": "ted_spread"
+            }
+
+            # 将TED利差数据对齐到美债的日期数组（前向填充）
+            target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+            ted_full = ted_data.reindex(target_index, method="ffill")
+            ted_aligned = ted_full[(ted_full.index >= start_date) & (ted_full.index <= end_date)]
+
+            for col, api_col in col_mapping.items():
+                if col in ted_aligned.columns:
+                    result["ted_spread"][api_col] = ted_aligned[col].tolist()
 
         return result
 

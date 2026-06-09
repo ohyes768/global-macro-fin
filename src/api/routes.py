@@ -31,12 +31,17 @@ from src.models import (
     FundFlowCumulativeResponse,
     FundFlowHistoryItem,
     FundFlowHistoryResponse,
+    ChinaBondData,
+    ChinaBondUpdateData,
+    TedSpreadData,
+    TedSpreadUpdateData,
 )
 from src.services.fred_service import get_fred_service
 from src.services.ecb_service import get_ecb_service
 from src.services.data_service import get_data_service
 from src.services.vix_service import get_vix_service
 from src.services.fund_flow_service import get_fund_flow_service
+from src.services.china_bond_service import get_china_bond_service
 from src.utils.logger import setup_logger
 from src.config import get_settings
 
@@ -917,7 +922,7 @@ async def health_check():
 
         # 获取最后更新时间
         last_updates = {}
-        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow"]:
+        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow", "china_bond", "ted_spread"]:
             last_date = data_service.get_last_date(data_type)
             if last_date:
                 last_updates[data_type] = last_date.strftime("%Y-%m-%d")
@@ -1361,3 +1366,288 @@ async def get_fund_flow_history(
     except Exception as e:
         logger.error(f"资金流向历史数据查询失败: {str(e)}")
         return FundFlowHistoryResponse(data=[])
+
+
+@router.post("/fetch/china-bonds/history", response_model=UpdateResponse)
+async def fetch_china_bonds_history():
+    """获取中国国债历史数据接口 - 从配置的开始日期获取全部历史数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取中国国债历史数据...")
+        china_bond_service = get_china_bond_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = settings.china_bond_start_date
+
+        logger.info(f"获取中国国债历史数据，从 {start_date} 到 {latest_end}")
+
+        # 获取中国国债收益率数据
+        bond_df = china_bond_service.fetch_china_bond_yield(start_date, latest_end.strftime("%Y-%m-%d"))
+
+        if bond_df.empty:
+            raise Exception("未能获取到任何中国国债数据")
+
+        # 保存中国国债数据
+        china_bond_data = {"10y": bond_df.iloc[:, 1] if len(bond_df.columns) > 1 else bond_df.iloc[:, 0]}
+        data_service.save_china_bond_data(china_bond_data)
+
+        # 构建响应数据
+        col_10y = bond_df.columns[1] if len(bond_df.columns) > 1 else bond_df.columns[0]
+        last_idx = bond_df.index[-1]
+        bond_10y_latest = ChinaBondData(
+            date=last_idx.date(),
+            value=float(bond_df[col_10y].iloc[-1]) if pd.notna(bond_df[col_10y].iloc[-1]) else None
+        )
+
+        response_data = ChinaBondUpdateData(china_bond_10y=bond_10y_latest)
+
+        logger.info("中国国债历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="中国国债历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取中国国债历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取中国国债历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/china-bonds", response_model=UpdateResponse)
+async def update_china_bonds():
+    """更新中国国债数据接口 - 增量更新最近 7 天的数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新中国国债数据...")
+        china_bond_service = get_china_bond_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新中国国债数据，从 {start_date} 到 {latest_end}")
+
+        # 获取中国国债收益率数据
+        bond_df = china_bond_service.fetch_china_bond_yield(start_date.strftime("%Y-%m-%d"), latest_end.strftime("%Y-%m-%d"))
+
+        if bond_df.empty:
+            raise Exception("未能获取到任何中国国债新数据")
+
+        # 保存中国国债数据
+        china_bond_data = {"10y": bond_df.iloc[:, 1] if len(bond_df.columns) > 1 else bond_df.iloc[:, 0]}
+        data_service.save_china_bond_data(china_bond_data)
+
+        # 构建响应数据
+        col_10y = bond_df.columns[1] if len(bond_df.columns) > 1 else bond_df.columns[0]
+        last_idx = bond_df.index[-1]
+        bond_10y_latest = ChinaBondData(
+            date=last_idx.date(),
+            value=float(bond_df[col_10y].iloc[-1]) if pd.notna(bond_df[col_10y].iloc[-1]) else None
+        )
+
+        response_data = ChinaBondUpdateData(china_bond_10y=bond_10y_latest)
+
+        logger.info("中国国债数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="中国国债数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"中国国债数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"中国国债数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/fetch/ted-spread/history", response_model=UpdateResponse)
+async def fetch_ted_spread_history():
+    """获取TED利差历史数据接口 - 从 20120101 开始获取全部历史数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取TED利差历史数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        # TED利差数据从2012年开始（SOFR的历史数据从2018年，但FRED有从2012年的）
+        start_date = pd.Timestamp("2012-01-01")
+
+        logger.info(f"获取TED利差历史数据，从 {start_date} 到 {latest_end}")
+
+        # 获取SOFR数据
+        sofr_code = settings.fred_codes.get("sofr", "SOFR")
+        sofr_series = await fred_service.fetch_series(sofr_code, start_date, latest_end)
+
+        # 获取3个月美债数据
+        us_3m_code = settings.fred_codes.get("us_3m", "DGS3MO")
+        us_3m_series = await fred_service.fetch_series(us_3m_code, start_date, latest_end)
+
+        if sofr_series.empty and us_3m_series.empty:
+            raise Exception("未能获取到任何TED利差数据")
+
+        # 保存TED利差数据
+        data_service.save_ted_spread_data(sofr_series, us_3m_series)
+
+        # 构建响应数据
+        # 使用SOFR的最后有效日期作为参考
+        sofr_last_idx = sofr_series.last_valid_index() if not sofr_series.empty else None
+        us_3m_last_idx = us_3m_series.last_valid_index() if not us_3m_series.empty else None
+
+        if sofr_last_idx is None and us_3m_last_idx is None:
+            raise Exception("未能获取到任何有效TED利差数据")
+
+        # 使用较新的日期
+        last_idx = sofr_last_idx if sofr_last_idx else us_3m_last_idx
+        sofr_val = float(sofr_series[last_idx]) if sofr_last_idx and pd.notna(sofr_series[sofr_last_idx]) else None
+        us_3m_val = float(us_3m_series[last_idx]) if us_3m_last_idx and pd.notna(us_3m_series[us_3m_last_idx]) else None
+        ted_val = (sofr_val - us_3m_val) if sofr_val is not None and us_3m_val is not None else None
+
+        response_data = TedSpreadUpdateData(
+            ted_spread=TedSpreadData(
+                date=last_idx.date() if last_idx else latest_end.date(),
+                sofr=sofr_val,
+                us_3m=us_3m_val,
+                ted_spread=ted_val
+            )
+        )
+
+        logger.info("TED利差历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="TED利差历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取TED利差历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取TED利差历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/ted-spread", response_model=UpdateResponse)
+async def update_ted_spread():
+    """更新TED利差数据接口 - 增量更新最近 7 天的数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新TED利差数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新TED利差数据，从 {start_date} 到 {latest_end}")
+
+        # 获取SOFR数据
+        sofr_code = settings.fred_codes.get("sofr", "SOFR")
+        sofr_series = await fred_service.fetch_series(sofr_code, start_date, latest_end)
+
+        # 获取3个月美债数据
+        us_3m_code = settings.fred_codes.get("us_3m", "DGS3MO")
+        us_3m_series = await fred_service.fetch_series(us_3m_code, start_date, latest_end)
+
+        if sofr_series.empty and us_3m_series.empty:
+            raise Exception("未能获取到任何TED利差新数据")
+
+        # 保存TED利差数据
+        data_service.save_ted_spread_data(sofr_series, us_3m_series)
+
+        # 构建响应数据
+        sofr_last_idx = sofr_series.last_valid_index() if not sofr_series.empty else None
+        us_3m_last_idx = us_3m_series.last_valid_index() if not us_3m_series.empty else None
+
+        if sofr_last_idx is None and us_3m_last_idx is None:
+            raise Exception("未能获取到任何有效TED利差数据")
+
+        last_idx = sofr_last_idx if sofr_last_idx else us_3m_last_idx
+        sofr_val = float(sofr_series[last_idx]) if sofr_last_idx and pd.notna(sofr_series[sofr_last_idx]) else None
+        us_3m_val = float(us_3m_series[last_idx]) if us_3m_last_idx and pd.notna(us_3m_series[us_3m_last_idx]) else None
+        ted_val = (sofr_val - us_3m_val) if sofr_val is not None and us_3m_val is not None else None
+
+        response_data = TedSpreadUpdateData(
+            ted_spread=TedSpreadData(
+                date=last_idx.date() if last_idx else latest_end.date(),
+                sofr=sofr_val,
+                us_3m=us_3m_val,
+                ted_spread=ted_val
+            )
+        )
+
+        logger.info("TED利差数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="TED利差数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"TED利差数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"TED利差数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
