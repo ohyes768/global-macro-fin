@@ -28,7 +28,8 @@ class DataService:
             "vix": self.data_dir / "vix.csv",
             "fund_flow": self.data_dir / "fund_flow.csv",
             "china_bond": self.data_dir / "china_bond.csv",
-            "ted_spread": self.data_dir / "ted_spread.csv"
+            "ted_spread": self.data_dir / "ted_spread.csv",
+            "commodities": self.data_dir / "commodities.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -148,6 +149,8 @@ class DataService:
             self._save_exchange_rates(data)
         elif key == "vix":
             self._save_vix(data)
+        elif key == "commodities":
+            self._save_commodities(data)
 
     def _save_by_auto_detection(self, data: Dict[str, pd.Series]) -> None:
         """根据数据键名自动识别并保存到对应的 CSV 文件
@@ -160,12 +163,14 @@ class DataService:
         jp_keys = ["jp_10y", "jp_3m"]
         exchange_keys = ["dollar_index", "usd_cny", "usd_jpy", "usd_eur"]
         vix_keys = ["vix"]
+        commodity_keys = ["gold", "oil", "copper"]
 
         us_data = {k: v for k, v in data.items() if k in us_keys and not v.empty}
         eu_data = {k: v for k, v in data.items() if k in eu_keys and not v.empty}
         jp_data = {k: v for k, v in data.items() if k in jp_keys and not v.empty}
         exchange_data = {k: v for k, v in data.items() if k in exchange_keys and not v.empty}
         vix_data = {k: v for k, v in data.items() if k in vix_keys and not v.empty}
+        commodity_data = {k: v for k, v in data.items() if k in commodity_keys and not v.empty}
 
         if us_data:
             self._save_us_treasuries(us_data)
@@ -177,6 +182,8 @@ class DataService:
             self._save_exchange_rates(exchange_data)
         if vix_data:
             self._save_vix(vix_data)
+        if commodity_data:
+            self._save_commodities(commodity_data)
 
     def _save_us_treasuries(self, data: Dict[str, pd.Series]) -> None:
         """保存美国国债数据
@@ -327,6 +334,40 @@ class DataService:
         self.append_data("ted_spread", ted_df)
         logger.info(f"已保存TED利差数据，共 {len(ted_df)} 条记录")
 
+    def _save_commodities(self, data: Dict[str, pd.Series]) -> None:
+        """保存商品数据（黄金/白银/原油/铜）
+
+        Args:
+            data: 商品数据字典，key 为 gold/silver/oil/copper
+        """
+        if not data:
+            logger.warning("商品数据为空，跳过保存")
+            return
+
+        col_mapping = {
+            "gold": "黄金",
+            "silver": "白银",
+            "oil": "原油",
+            "copper": "铜",
+        }
+
+        # 始终保留 4 列（即使某个 series 为空），保证 CSV header 完整
+        commodity_data = {}
+        for fred_key, col_name in col_mapping.items():
+            if fred_key in data and not data[fred_key].empty:
+                commodity_data[col_name] = data[fred_key]
+            else:
+                commodity_data[col_name] = pd.Series(dtype="float64")
+
+        commodity_df = pd.DataFrame(commodity_data)
+        commodity_df.index.name = "date"
+        self._ensure_file_exists(self.files["commodities"], list(col_mapping.values()))
+        self.append_data("commodities", commodity_df)
+        logger.info(
+            f"已保存商品数据: {[k for k, v in commodity_data.items() if not v.empty]}，"
+            f"共 {len(commodity_df)} 条记录"
+        )
+
     def save_ted_spread_data(self, sofr: pd.Series, us_3m: pd.Series) -> None:
         """保存TED利差数据
 
@@ -452,6 +493,12 @@ class DataService:
                 "sofr": [],
                 "us_3m": [],
                 "ted_spread": []
+            },
+            "commodities": {
+                "gold": [],
+                "silver": [],
+                "oil": [],
+                "copper": []
             }
         }
 
@@ -611,6 +658,32 @@ class DataService:
             for col, api_col in col_mapping.items():
                 if col in ted_aligned.columns:
                     result["ted_spread"][api_col] = ted_aligned[col].tolist()
+
+        # 加载商品数据
+        commodity_data = self.load_data("commodities")
+        if not commodity_data.empty:
+            commodity_data = commodity_data.ffill()
+
+            # 将商品数据对齐到美债的日期数组（前向填充）
+            # 这保证 commodities 各字段长度与 dates 一致，前端 Plotly 才能正确配对 x/y
+            target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+
+            # 兼容老 CSV（无 silver 列）：reindex columns 自动补 NaN，前端 Plotly 会自动断开
+            expected_cols = ["黄金", "白银", "原油", "铜"]
+            commodity_aligned = commodity_data.reindex(columns=expected_cols)
+            commodity_full = commodity_aligned.reindex(target_index, method="ffill")
+            commodity_filtered = commodity_full[(commodity_full.index >= start_date) & (commodity_full.index <= end_date)]
+
+            col_mapping = {
+                "黄金": "gold",
+                "白银": "silver",
+                "原油": "oil",
+                "铜": "copper",
+            }
+
+            for chinese_col, api_col in col_mapping.items():
+                if chinese_col in commodity_filtered.columns:
+                    result["commodities"][api_col] = commodity_filtered[chinese_col].tolist()
 
         return result
 

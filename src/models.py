@@ -196,6 +196,7 @@ class UpdateResponse(BaseModel):
         | FundFlowUpdateData
         | ChinaBondUpdateData
         | TedSpreadUpdateData
+        | CommoditiesUpdateData
     ] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None
@@ -245,3 +246,19 @@ class TedSpreadUpdateData(BaseModel):
     """TED利差更新响应数据"""
 
     ted_spread: TedSpreadData
+
+
+class CommoditiesData(BaseModel):
+    """商品数据（黄金/白银/原油/铜，统一走阿里云 alirmcom2）"""
+
+    date: date
+    gold: Optional[float] = None     # 黄金（元/克，SGEAU9999）
+    silver: Optional[float] = None   # 白银（元/克，SGEAG9999）
+    oil: Optional[float] = None      # 原油（美元/桶，UKOIL）
+    copper: Optional[float] = None   # 铜（美元/吨，USHG）
+
+
+class CommoditiesUpdateData(BaseModel):
+    """商品更新响应数据"""
+
+    commodities: CommoditiesData

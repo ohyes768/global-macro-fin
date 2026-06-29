@@ -35,6 +35,8 @@ from src.models import (
     ChinaBondUpdateData,
     TedSpreadData,
     TedSpreadUpdateData,
+    CommoditiesData,
+    CommoditiesUpdateData,
 )
 from src.services.fred_service import get_fred_service
 from src.services.ecb_service import get_ecb_service
@@ -42,6 +44,7 @@ from src.services.data_service import get_data_service
 from src.services.vix_service import get_vix_service
 from src.services.fund_flow_service import get_fund_flow_service
 from src.services.china_bond_service import get_china_bond_service
+from src.services.commodity_service import get_commodity_service
 from src.utils.logger import setup_logger
 from src.config import get_settings
 
@@ -169,6 +172,54 @@ async def _fetch_exchange_rates(
 
     exchange_data = await fred_service.fetch_exchange_rates(start_date, end_date)
     return exchange_data
+
+
+def _compute_incremental_start(
+    data_service, data_type: str, latest_end: pd.Timestamp
+):
+    """计算增量更新起点（关键修复：避免数据落后时出现 gap）
+
+    旧逻辑用 `latest_end - 7 days` 作为起点：当数据落后超过 7 天时，
+    `append_data` 拼接时会跳过中间日期，导致数据断裂（CSV last_date 之后有 gap）。
+
+    新逻辑：用 CSV last_date + 1 作为起点，保证补齐所有缺失日期。
+
+    Returns:
+        start_date (pd.Timestamp) 或 None（数据已是最新，无需更新）
+    """
+    last_date = data_service.get_last_date(data_type)
+    if last_date is None:
+        # CSV 为空：全量获取（从历史起点）
+        return pd.Timestamp(settings.historical_start_date)
+
+    # 从 CSV 最后日期的次日开始（补齐中间缺失的日期）
+    start = pd.Timestamp(last_date) + pd.Timedelta(days=1)
+
+    # 兜底：如果 start > latest_end，说明数据已是最新，无须拉取
+    # （FRED API 会拒绝 observation_start > observation_end 的请求）
+    if start > latest_end:
+        logger.info(f"{data_type} 数据已是最新（last_date={last_date.strftime('%Y-%m-%d')}），无需更新")
+        return None
+
+    return start
+
+
+async def _fetch_commodities(
+    commodity_service,
+    start_date: pd.Timestamp, end_date: pd.Timestamp
+) -> dict:
+    """获取商品数据的内部函数（黄金/白银/原油/铜，统一走阿里云 alirmcom2）
+
+    Args:
+        commodity_service: 商品服务实例
+        start_date: 起始日期
+        end_date: 结束日期
+
+    Returns:
+        商品数据字典 {gold, silver, oil, copper}
+    """
+    logger.info(f"获取商品数据范围: {start_date} 到 {end_date}")
+    return await commodity_service.fetch_all(start_date, end_date)
 
 def _build_response_data(new_data: dict, end_date: pd.Timestamp) -> MacroData:
     """构建响应数据的内部函数（不包含汇率）
@@ -324,7 +375,7 @@ async def fetch_us_treasuries_history():
 
 @router.post("/update/us-treasuries", response_model=UpdateResponse)
 async def update_us_treasuries():
-    """更新美国国债数据接口 - 增量更新最近 7 天的数据"""
+    """更新美国国债数据接口 - 增量更新（从 CSV last_date+1 到今天，补齐中间缺失日期）"""
     global _is_updating
 
     if _is_updating:
@@ -342,7 +393,24 @@ async def update_us_treasuries():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        us_start = (latest_end - pd.Timedelta(days=7)).normalize()
+        us_start = _compute_incremental_start(data_service, "us_treasuries", latest_end)
+
+        if us_start is None:
+            # 数据已是最新，直接返回 success（无需拉取/保存）
+            logger.info("美债数据已是最新，跳过本次更新")
+            response_data = USTreasuriesUpdateData(
+                us_treasuries=USTreasuries(
+                    m3=TreasuryData(date=latest_end.date(), value=None),
+                    y2=TreasuryData(date=latest_end.date(), value=None),
+                    y10=TreasuryData(date=latest_end.date(), value=None),
+                )
+            )
+            return UpdateResponse(
+                success=True,
+                message="美债数据已是最新，无需更新",
+                data=response_data,
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新美债数据，从 {us_start} 到 {latest_end}")
 
@@ -463,7 +531,7 @@ async def fetch_exchange_rates_history():
 
 @router.post("/update/exchange-rates", response_model=UpdateResponse)
 async def update_exchange_rates():
-    """更新汇率数据接口 - 增量更新最近 7 天的数据"""
+    """更新汇率数据接口 - 增量更新（从 CSV last_date+1 到今天，补齐中间缺失日期）"""
     global _is_updating
 
     if _is_updating:
@@ -481,7 +549,25 @@ async def update_exchange_rates():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "exchange_rates", latest_end)
+
+        if start_date is None:
+            # 数据已是最新，直接返回 success
+            logger.info("汇率数据已是最新，跳过本次更新")
+            response_data = ExchangeRatesUpdateData(
+                exchange_rates=ExchangeRates(
+                    dollar_index=ExchangeRateData(date=latest_end.date(), value=None),
+                    usd_cny=ExchangeRateData(date=latest_end.date(), value=None),
+                    usd_jpy=ExchangeRateData(date=latest_end.date(), value=None),
+                    usd_eur=ExchangeRateData(date=latest_end.date(), value=None),
+                )
+            )
+            return UpdateResponse(
+                success=True,
+                message="汇率数据已是最新，无需更新",
+                data=response_data,
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新汇率数据，从 {start_date} 到 {latest_end}")
 
@@ -818,44 +904,38 @@ async def update_data():
         latest_end = pd.Timestamp.now().normalize()
 
         # 检查美债数据的最后日期
-        us_last_date = data_service.get_last_date("us_treasuries")
-        if us_last_date is None:
-            # 首次获取，从 2000 年开始
-            us_start = pd.Timestamp(settings.historical_start_date)
-            logger.info(f"首次获取美债历史数据，从 {us_start} 到 {latest_end}")
+        us_start = _compute_incremental_start(data_service, "us_treasuries", latest_end)
+        if us_start is None:
+            logger.info(f"美债数据已是最新，无需更新（last_date={data_service.get_last_date('us_treasuries').strftime('%Y-%m-%d')}）")
         else:
-            # 增量更新，获取最近 7 天
-            us_start = (latest_end - pd.Timedelta(days=7)).normalize()
-            logger.info(f"增量更新美债数据，从 {us_start} 到 {latest_end}")
+            logger.info(f"美债增量更新，从 {us_start} 到 {latest_end}")
 
         # OECD 数据使用 365 天范围
         oecd_start = (latest_end - pd.Timedelta(days=365)).normalize()
         logger.info(f"获取 OECD 债券数据范围: {oecd_start} 到 {latest_end}")
 
         # 汇率数据也使用增量更新策略
-        er_last_date = data_service.get_last_date("exchange_rates")
-        if er_last_date is None:
-            # 首次获取，从 2000 年开始
-            er_start = pd.Timestamp(settings.historical_start_date)
-            logger.info(f"首次获取汇率历史数据，从 {er_start} 到 {latest_end}")
+        er_start = _compute_incremental_start(data_service, "exchange_rates", latest_end)
+        if er_start is None:
+            logger.info(f"汇率数据已是最新，无需更新（last_date={data_service.get_last_date('exchange_rates').strftime('%Y-%m-%d')}）")
         else:
-            # 增量更新，获取最近 7 天
-            er_start = (latest_end - pd.Timedelta(days=7)).normalize()
-            logger.info(f"增量更新汇率数据，从 {er_start} 到 {latest_end}")
+            logger.info(f"汇率增量更新，从 {er_start} 到 {latest_end}")
 
         new_data = {}
         exchange_data = {}
 
-        # 获取美国国债数据（3m, 2y, 10y）
-        us_data = await _fetch_us_treasuries(fred_service, us_start, latest_end)
-        new_data.update(us_data)
+        # 获取美国国债数据（3m, 2y, 10y）— 数据已是最新时跳过
+        if us_start is not None:
+            us_data = await _fetch_us_treasuries(fred_service, us_start, latest_end)
+            new_data.update(us_data)
 
         # 获取 OECD 数据（德国、日本 10y）
         oecd_data = await _fetch_oecd_bonds(fred_service, oecd_start, latest_end)
         new_data.update(oecd_data)
 
-        # 获取汇率数据
-        exchange_data = await _fetch_exchange_rates(fred_service, er_start, latest_end)
+        # 获取汇率数据 — 数据已是最新时跳过
+        if er_start is not None:
+            exchange_data = await _fetch_exchange_rates(fred_service, er_start, latest_end)
 
         if not new_data and not exchange_data:
             raise Exception("未能获取到任何新数据")
@@ -1647,6 +1727,161 @@ async def update_ted_spread():
         return UpdateResponse(
             success=False,
             message=f"TED利差数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/fetch/commodities/history", response_model=UpdateResponse)
+async def fetch_commodities_history():
+    """获取商品（黄金/原油/铜）历史数据接口 - 从 2000 年开始获取全部历史数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取商品历史数据...")
+        commodity_service = get_commodity_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = pd.Timestamp(settings.historical_start_date)
+
+        logger.info(f"获取商品历史数据，从 {start_date} 到 {latest_end}")
+
+        new_data = await _fetch_commodities(
+            commodity_service, start_date, latest_end
+        )
+
+        if not any(not series.empty for series in new_data.values()):
+            raise Exception("未能获取到任何商品数据")
+
+        data_service.save_fred_data(new_data, key="commodities")
+
+        # 构建响应数据
+        latest = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest[name] = float(series[last_idx]) if pd.notna(series[last_idx]) else None
+
+        gold = latest.get("gold")
+        silver = latest.get("silver")
+        oil = latest.get("oil")
+        copper = latest.get("copper")
+
+        # 使用最近的有效日期作为响应日期
+        any_series = next((s for s in new_data.values() if not s.empty), None)
+        response_date = any_series.last_valid_index() if any_series is not None else latest_end
+        response_data = CommoditiesUpdateData(
+            commodities=CommoditiesData(
+                date=response_date.date() if response_date is not None else latest_end.date(),
+                gold=gold,
+                silver=silver,
+                oil=oil,
+                copper=copper
+            )
+        )
+
+        logger.info("商品历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="商品历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取商品历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取商品历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/commodities", response_model=UpdateResponse)
+async def update_commodities():
+    """更新商品（黄金/原油/铜）数据接口 - 增量更新最近 7 天的数据"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新商品数据...")
+        commodity_service = get_commodity_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新商品数据，从 {start_date} 到 {latest_end}")
+
+        new_data = await _fetch_commodities(
+            commodity_service, start_date, latest_end
+        )
+
+        if not any(not series.empty for series in new_data.values()):
+            raise Exception("未能获取到任何商品新数据")
+
+        data_service.save_fred_data(new_data, key="commodities")
+
+        # 构建响应数据
+        latest = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest[name] = float(series[last_idx]) if pd.notna(series[last_idx]) else None
+
+        gold = latest.get("gold")
+        silver = latest.get("silver")
+        oil = latest.get("oil")
+        copper = latest.get("copper")
+
+        any_series = next((s for s in new_data.values() if not s.empty), None)
+        response_date = any_series.last_valid_index() if any_series is not None else latest_end
+        response_data = CommoditiesUpdateData(
+            commodities=CommoditiesData(
+                date=response_date.date() if response_date is not None else latest_end.date(),
+                gold=gold,
+                silver=silver,
+                oil=oil,
+                copper=copper
+            )
+        )
+
+        logger.info("商品数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="商品数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"商品数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"商品数据增量更新失败: {str(e)}",
             error_code="UPDATE_FAILED"
         )
     finally:

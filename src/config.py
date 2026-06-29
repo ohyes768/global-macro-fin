@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     max_retries: int = 3
     retry_delay: float = 1.0
 
+    # 阿里云市场 API（商品数据统一来源：黄金/白银/原油/铜）
+    alirmcom_appcode: str = ""           # Authorization: APPCODE xxx（从阿里云市场控制台获取）
+    alirmcom_base_url: str = "https://alirmcom2.market.alicloudapi.com"
+
+    # 商品 symbol 映射（commodity_service 内部按 alirmcom 真实路径再加工）
+    commodity_symbols: dict = {
+        "gold": "SGEAU9999",     # 上海黄金交易所 Au99.99（元/克）
+        "silver": "SGEAG9999",   # 上海黄金交易所 Ag99.99（元/克）
+        "oil": "UKOIL",          # UKOIL 布伦特原油（美元/桶）
+        "copper": "USHG",        # USHG 铜（美元/吨）
+    }
+
     # FRED 数据代码
     fred_codes: dict = {
         "us_3m": "DGS3MO",
@@ -40,6 +52,7 @@ class Settings(BaseSettings):
         "vix": "VIXCLS",               # CBOE波动率指数
         # SOFR（担保隔夜融资利率）
         "sofr": "SOFR",                # 纽约联储银行
+        # 商品数据（黄金/白银/原油/铜）已统一改走阿里云市场 API alirmcom2，不再走 FRED
     }
 
 
