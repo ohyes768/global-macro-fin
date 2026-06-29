@@ -1,18 +1,20 @@
-"""商品数据服务模块 — 阿里云 alirmcom2 API（黄金/白银/原油/铜）
+"""商品数据服务模块 — 阿里云 alirmcom2 comrms 批量接口（黄金/白银/原油/铜）
 
-参考 dividend-select 的真实实现（calculator.py / m120_service.py）：
-- 接口域名: http://alirmcom2.market.alicloudapi.com（注意是 http 不是 https）
-- 历史 K 线: /query/comkm（支持翻页；商品需要历史曲线，用这个）
-- 批量实时行情: /query/comrms（只返回最新价；不适合画历史曲线）
+参考 dividend-select m120_service._get_realtime_prices_batch：
+- 接口: GET /query/comrms?symbols=A,B,C,D（注意是 symbols 复数 + 逗号分隔）
 - 认证: Authorization: APPCODE {appcode}
-- 响应: {"Code": 0, "Msg": "", "Obj": [{"C": 收盘, "D": "YYYY-MM-DD HH:MM:SS", ...}]}
-- 翻页参数: period=D（日线）/ pidx=页码 / psize=每页条数 / withlast=0
+- 响应: {"Code":0, "Msg":"", "Obj":[{"C":代码, "P":实时价, "YC":昨日收盘, ...}, ...]}
+
+策略：
+- comrms 是实时行情接口（不带历史）
+- commodity_service.fetch_all() 一次批量拿 4 个商品的最新价 + 昨日收盘
+- 后端 routes update_commodities 把每天的价 append 到 commodities.csv（每天一行）
+- 多次 append 累积成历史曲线（commodity tab 切换时间窗口看走势）
 """
 import asyncio
 from typing import Dict, Optional
 
 import httpx
-import pandas as pd
 
 from src.config import get_settings
 from src.utils.logger import setup_logger
@@ -22,9 +24,9 @@ settings = get_settings()
 
 
 class AliyunCommodityClient:
-    """阿里云 alirmcom2 商品 K 线客户端（基于 comkm 接口，参考 dividend-select）"""
+    """阿里云 alirmcom2 商品批量客户端（基于 comrms 实时行情接口）"""
 
-    API_PATH = "/query/comkm"
+    API_PATH = "/query/comrms"
 
     def __init__(self, appcode: str, base_url: str):
         self._headers = {"Authorization": f"APPCODE {appcode}"}
@@ -40,134 +42,119 @@ class AliyunCommodityClient:
             await self._client.aclose()
             self._client = None
 
-    async def fetch_history(
-        self,
-        symbol: str,
-        start_date: pd.Timestamp,
-        end_date: pd.Timestamp,
-    ) -> pd.Series:
-        """获取单个商品历史 K 线（阿里云 alirmcom2 comkm 接口）
-
-        翻页策略：从 pidx=1 开始按 psize=500 拉，直到数据日期早于 start_date。
+    async def fetch_realtime_batch(self, symbols: list[str]) -> Dict[str, dict]:
+        """批量获取多个商品的实时行情
 
         Args:
-            symbol: 商品代码（SGEAU9999 / SGEAG9999 / UKOIL / USHG）
-            start_date: 起始日期
-            end_date: 结束日期（实际接口按 pidx 翻页，不由 end_date 控制）
+            symbols: 商品代码列表（如 ["SGEAU9999", "SGEAG9999", "UKOIL", "USHG"]）
 
         Returns:
-            价格 Series（按日期索引），name=symbol
+            {symbol: {"realtime": float | None, "close": float | None}}
+            realtime = 当前实时价 (字段 P)，close = 昨日收盘 (字段 YC)
         """
+        if not symbols:
+            return {}
         if self._client is None:
             raise RuntimeError("AliyunCommodityClient must be used via 'async with'")
 
-        all_rows: list[dict] = []
-        pidx = 1
-        while True:
-            params = {
-                "period": "D",
-                "pidx": pidx,
-                "psize": 500,
-                "symbol": symbol,
-                "withlast": 0,
+        # 一次调用拿所有商品的实时价 + 昨日收盘
+        symbols_str = ",".join(symbols)
+        params = {"symbols": symbols_str}
+        url = f"{self._base}{self.API_PATH}"
+        logger.info(f"aliyun comrms batch fetch {len(symbols)} symbols: {symbols_str}")
+        resp = await self._client.get(url, params=params)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        if not isinstance(payload, dict):
+            logger.error(f"aliyun comrms 返回非 dict: {type(payload).__name__}")
+            return {}
+        code_val = payload.get("Code")
+        if code_val != 0:
+            logger.error(f"aliyun comrms 返回错误: Code={code_val}, Msg={payload.get('Msg', '')}")
+            return {}
+
+        items = payload.get("Obj") or []
+        logger.info(f"aliyun comrms 返回 Obj 数量: {len(items)}")
+
+        out: Dict[str, dict] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            # comrms 返回的代码可能是 "SGEAU9999" 或 "sh601919"，统一去前缀 + 大写
+            code = item.get("C", "")
+            if not code:
+                continue
+            code_upper = code.upper()
+            for prefix in ("SH", "SZ", "BJ"):
+                if code_upper.startswith(prefix):
+                    code = code_upper[len(prefix):]
+                    break
+            realtime = item.get("P")
+            close = item.get("YC")
+            out[code] = {
+                "realtime": float(realtime) if realtime not in (None, "") else None,
+                "close": float(close) if close not in (None, "") else None,
             }
-            url = f"{self._base}{self.API_PATH}"
-            logger.info(f"aliyun fetch {symbol} page {pidx}")
-            resp = await self._client.get(url, params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-
-            if not isinstance(payload, dict):
-                logger.error(f"aliyun {symbol} 返回非 dict: {type(payload).__name__}")
-                break
-            code_val = payload.get("Code")
-            if code_val != 0:
-                logger.error(f"aliyun {symbol} 返回错误: Code={code_val}, Msg={payload.get('Msg', '')}")
-                break
-
-            klines = payload.get("Obj") or []
-            if not klines:
-                break
-
-            earliest_reached = False
-            for item in klines:
-                if not isinstance(item, dict):
-                    continue
-                date_str = item.get("D", "")
-                close_val = item.get("C")
-                if not date_str or close_val is None:
-                    continue
-                try:
-                    ts = pd.to_datetime(date_str)
-                    if ts < start_date:
-                        earliest_reached = True
-                        break
-                    if ts <= end_date:
-                        all_rows.append({"date": ts, "price": float(close_val)})
-                except (ValueError, TypeError):
-                    continue
-
-            # 数据按日期倒序返回；本批已读到 start_date 之前就停
-            if earliest_reached:
-                break
-            if len(klines) < 500:
-                break  # 最后一页
-            pidx += 1
-            if pidx > 50:  # 防御性上限：500 × 50 = 25000 条
-                logger.warning(f"aliyun {symbol} 翻页超过 50 次，强制停止")
-                break
-
-        if not all_rows:
-            logger.warning(f"aliyun {symbol} 无有效数据")
-            return pd.Series(dtype="float64", name=symbol)
-
-        df = pd.DataFrame(all_rows).set_index("date").sort_index()
-        return df["price"].rename(symbol)
+        return out
 
 
 class CommodityService:
-    """商品数据服务 — 统一走阿里云 alirmcom2 comkm（黄金/白银/原油/铜）"""
+    """商品数据服务 — 阿里云 alirmcom2 comrms 批量（黄金/白银/原油/铜）
+
+    命名约定：
+    - fetch_realtime() / fetch_all_realtime()：拿 4 个商品的当前价 + 昨日收盘（一次 comrms 调用）
+    - 历史上累积的数据由后端 routes 在每次 update_commodities 时 append 到 commodities.csv
+    """
 
     @staticmethod
-    async def fetch_history(
-        name: str, start_date: pd.Timestamp, end_date: pd.Timestamp
-    ) -> pd.Series:
-        """获取单个商品历史数据（gold / silver / oil / copper）"""
+    async def fetch_realtime(name: str) -> Optional[dict]:
+        """获取单个商品的当前实时价 + 昨日收盘（单 symbol 批量调用）"""
         symbol = settings.commodity_symbols.get(name)
         if not symbol:
-            logger.error(f"未知商品: {name}（应在 commodity_symbols 中）")
-            return pd.Series(dtype="float64", name=name)
+            logger.error(f"未知商品: {name}")
+            return None
         if not settings.alirmcom_appcode:
-            logger.error("ALIRMCOM_APPCODE 未配置，无法调用阿里云商品 API")
-            return pd.Series(dtype="float64", name=name)
+            logger.error("ALIRMCOM_APPCODE 未配置")
+            return None
         try:
             async with AliyunCommodityClient(
                 settings.alirmcom_appcode, settings.alirmcom_base_url
             ) as client:
-                return await client.fetch_history(symbol, start_date, end_date)
+                batch = await client.fetch_realtime_batch([symbol])
+                return batch.get(symbol)
         except Exception as e:
             logger.error(f"aliyun {name}({symbol}) 获取失败: {e}")
-            return pd.Series(dtype="float64", name=name)
+            return None
 
     @staticmethod
-    async def fetch_all(
-        start_date: pd.Timestamp, end_date: pd.Timestamp
-    ) -> Dict[str, pd.Series]:
-        """4 个商品并行 fetch（asyncio.gather，单商品失败不拖垮其他）
+    async def fetch_all() -> Dict[str, dict]:
+        """4 个商品一次性批量获取（单次 comrms 调用）
 
         Returns:
-            dict: {gold, silver, oil, copper} -> pd.Series
+            dict: {gold: {realtime, close}, silver: ..., oil: ..., copper: ...}
         """
+        if not settings.alirmcom_appcode:
+            logger.error("ALIRMCOM_APPCODE 未配置")
+            return {}
         names = ["gold", "silver", "oil", "copper"]
-        tasks = [CommodityService.fetch_history(n, start_date, end_date) for n in names]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        out: Dict[str, pd.Series] = {}
-        for n, r in zip(names, results):
-            if isinstance(r, Exception):
-                logger.error(f"gather {n} 异常: {r}")
-                out[n] = pd.Series(dtype="float64", name=n)
+        symbols = [settings.commodity_symbols[n] for n in names if settings.commodity_symbols.get(n)]
+        try:
+            async with AliyunCommodityClient(
+                settings.alirmcom_appcode, settings.alirmcom_base_url
+            ) as client:
+                batch = await client.fetch_realtime_batch(symbols)
+        except Exception as e:
+            logger.error(f"aliyun 批量获取失败: {e}")
+            return {}
+
+        out: Dict[str, dict] = {}
+        for n in names:
+            sym = settings.commodity_symbols.get(n)
+            if sym and sym in batch:
+                out[n] = batch[sym]
             else:
-                out[n] = r
+                out[n] = {"realtime": None, "close": None}
         return out
 
 

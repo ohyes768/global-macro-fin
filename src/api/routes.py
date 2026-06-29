@@ -206,20 +206,25 @@ def _compute_incremental_start(
 
 async def _fetch_commodities(
     commodity_service,
-    start_date: pd.Timestamp, end_date: pd.Timestamp
 ) -> dict:
-    """获取商品数据的内部函数（黄金/白银/原油/铜，统一走阿里云 alirmcom2）
+    """获取商品当前实时价（黄金/白银/原油/铜，统一走阿里云 alirmcom2 comrms 批量接口）
+
+    comrms 是实时行情接口，一次调用拿 4 个商品的最新价 + 昨日收盘。
+    历史曲线由本函数返回值每天 append 到 commodities.csv 累积形成。
 
     Args:
         commodity_service: 商品服务实例
-        start_date: 起始日期
-        end_date: 结束日期
 
     Returns:
-        商品数据字典 {gold, silver, oil, copper}
+        商品当前价字典 {gold: float|None, silver: ..., oil: ..., copper: ...}
     """
-    logger.info(f"获取商品数据范围: {start_date} 到 {end_date}")
-    return await commodity_service.fetch_all(start_date, end_date)
+    logger.info("批量获取商品实时价（comrms）")
+    batch = await commodity_service.fetch_all()
+    # batch: {gold: {realtime, close}, ...} → 拍平为 {gold: realtime, ...}
+    return {
+        name: (info.get("realtime") if isinstance(info, dict) else None)
+        for name, info in batch.items()
+    }
 
 def _build_response_data(new_data: dict, end_date: pd.Timestamp) -> MacroData:
     """构建响应数据的内部函数（不包含汇率）
@@ -1735,7 +1740,12 @@ async def update_ted_spread():
 
 @router.post("/fetch/commodities/history", response_model=UpdateResponse)
 async def fetch_commodities_history():
-    """获取商品（黄金/原油/铜）历史数据接口 - 从 2000 年开始获取全部历史数据"""
+    """获取商品（黄金/白银/原油/铜）数据接口 - comrms 批量接口一次性写入当天快照
+
+    comrms 是实时行情接口，无历史。每次调用拿 4 个商品的当前价 + 昨日收盘，
+    append 到 commodities.csv 当天行（每天一行，多次调用覆盖当天）。
+    历史曲线由多次调用累积形成。
+    """
     global _is_updating
 
     if _is_updating:
@@ -1748,43 +1758,27 @@ async def fetch_commodities_history():
     await acquire_update_lock()
 
     try:
-        logger.info("开始获取商品历史数据...")
+        logger.info("开始获取商品数据（comrms 批量）...")
         commodity_service = get_commodity_service()
         data_service = get_data_service()
 
-        latest_end = pd.Timestamp.now().normalize()
-        start_date = pd.Timestamp(settings.historical_start_date)
+        new_data = await _fetch_commodities(commodity_service)
 
-        logger.info(f"获取商品历史数据，从 {start_date} 到 {latest_end}")
+        if not any(v is not None for v in new_data.values()):
+            raise Exception("未能获取到任何商品数据（阿里云 comrms 返回全空）")
 
-        new_data = await _fetch_commodities(
-            commodity_service, start_date, latest_end
-        )
+        # 把当天 4 个商品价格 append 到 commodities.csv（同一天多次则覆盖当天行）
+        data_service.append_today_commodities(new_data)
 
-        if not any(not series.empty for series in new_data.values()):
-            raise Exception("未能获取到任何商品数据")
+        gold = new_data.get("gold")
+        silver = new_data.get("silver")
+        oil = new_data.get("oil")
+        copper = new_data.get("copper")
+        today = pd.Timestamp.now().normalize().date()
 
-        data_service.save_fred_data(new_data, key="commodities")
-
-        # 构建响应数据
-        latest = {}
-        for name, series in new_data.items():
-            if not series.empty:
-                last_idx = series.last_valid_index()
-                if last_idx is not None:
-                    latest[name] = float(series[last_idx]) if pd.notna(series[last_idx]) else None
-
-        gold = latest.get("gold")
-        silver = latest.get("silver")
-        oil = latest.get("oil")
-        copper = latest.get("copper")
-
-        # 使用最近的有效日期作为响应日期
-        any_series = next((s for s in new_data.values() if not s.empty), None)
-        response_date = any_series.last_valid_index() if any_series is not None else latest_end
         response_data = CommoditiesUpdateData(
             commodities=CommoditiesData(
-                date=response_date.date() if response_date is not None else latest_end.date(),
+                date=today,
                 gold=gold,
                 silver=silver,
                 oil=oil,
@@ -1813,7 +1807,7 @@ async def fetch_commodities_history():
 
 @router.post("/update/commodities", response_model=UpdateResponse)
 async def update_commodities():
-    """更新商品（黄金/原油/铜）数据接口 - 增量更新最近 7 天的数据"""
+    """更新商品（黄金/白银/原油/铜）数据接口 - 同 fetch/commodities/history（都是当天快照）"""
     global _is_updating
 
     if _is_updating:
@@ -1830,38 +1824,22 @@ async def update_commodities():
         commodity_service = get_commodity_service()
         data_service = get_data_service()
 
-        latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        new_data = await _fetch_commodities(commodity_service)
 
-        logger.info(f"增量更新商品数据，从 {start_date} 到 {latest_end}")
-
-        new_data = await _fetch_commodities(
-            commodity_service, start_date, latest_end
-        )
-
-        if not any(not series.empty for series in new_data.values()):
+        if not any(v is not None for v in new_data.values()):
             raise Exception("未能获取到任何商品新数据")
 
-        data_service.save_fred_data(new_data, key="commodities")
+        data_service.append_today_commodities(new_data)
 
-        # 构建响应数据
-        latest = {}
-        for name, series in new_data.items():
-            if not series.empty:
-                last_idx = series.last_valid_index()
-                if last_idx is not None:
-                    latest[name] = float(series[last_idx]) if pd.notna(series[last_idx]) else None
+        gold = new_data.get("gold")
+        silver = new_data.get("silver")
+        oil = new_data.get("oil")
+        copper = new_data.get("copper")
+        today = pd.Timestamp.now().normalize().date()
 
-        gold = latest.get("gold")
-        silver = latest.get("silver")
-        oil = latest.get("oil")
-        copper = latest.get("copper")
-
-        any_series = next((s for s in new_data.values() if not s.empty), None)
-        response_date = any_series.last_valid_index() if any_series is not None else latest_end
         response_data = CommoditiesUpdateData(
             commodities=CommoditiesData(
-                date=response_date.date() if response_date is not None else latest_end.date(),
+                date=today,
                 gold=gold,
                 silver=silver,
                 oil=oil,

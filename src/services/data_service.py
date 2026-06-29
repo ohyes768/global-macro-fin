@@ -443,6 +443,53 @@ class DataService:
         self.append_data("fund_flow", fund_flow_df)
         logger.info(f"已保存资金流向数据，共 {len(fund_flow_df)} 条记录")
 
+    def append_today_commodities(self, prices: Dict[str, Optional[float]]) -> None:
+        """把当天 4 个商品价格写入 commodities.csv（每天一行，多次调用覆盖当天）
+
+        适配阿里云 alirmcom2 comrms 实时行情接口：每次调用拿当前价，append 到 CSV
+        形成历史曲线。
+
+        Args:
+            prices: {"gold": 906.19, "silver": None, "oil": 84.36, "copper": 13483.75}
+                    值为 None 表示该商品本次未拿到，跳过（保留旧值或留空）
+        """
+        today = pd.Timestamp.now().normalize()
+        col_mapping = {"gold": "黄金", "silver": "白银", "oil": "原油", "copper": "铜"}
+        expected_cols = list(col_mapping.values())  # ["黄金", "白银", "原油", "铜"]
+
+        # 加载现有数据
+        existing = self.load_data("commodities")
+
+        if existing.empty:
+            # CSV 不存在或为空：创建只含今日 1 行
+            row = {cn: prices.get(name) for name, cn in col_mapping.items()}
+            df = pd.DataFrame([row], index=pd.DatetimeIndex([today], name="date"))
+        else:
+            # 兼容老 CSV（无白银列）：reindex columns 自动补 NaN
+            existing = existing.reindex(columns=expected_cols)
+            if today in existing.index:
+                # 已有今日行：合并（None 不覆盖已有值）
+                idx = existing.index.get_loc(today)
+                for name, cn in col_mapping.items():
+                    v = prices.get(name)
+                    if v is not None:
+                        existing.iloc[idx, existing.columns.get_loc(cn)] = v
+                df = existing
+            else:
+                # 新增今日行（缺失值填 None）
+                row = {cn: prices.get(name) for name, cn in col_mapping.items()}
+                df = existing.append(pd.DataFrame([row], index=pd.DatetimeIndex([today], name="date")))
+
+        df = df.sort_index()
+        # 确保索引名是 "date"（load_data 用 index_col=0）
+        df.index.name = "date"
+        # 写盘
+        self.save_data("commodities", df)
+        logger.info(
+            f"已 append 当天商品快照 ({today.strftime('%Y-%m-%d')}): "
+            f"{[(k, v) for k, v in prices.items() if v is not None]}"
+        )
+
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> Dict:
