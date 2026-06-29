@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     retry_delay: float = 1.0
 
     # 阿里云市场 API（商品数据统一来源：黄金/白银/原油/铜）
+    # 参考 dividend-select 的实现：base_url 用 http（非 https），商品走 comkm K线接口
     alirmcom_appcode: str = ""           # Authorization: APPCODE xxx（从阿里云市场控制台获取）
-    alirmcom_base_url: str = "https://alirmcom2.market.alicloudapi.com"
+    alirmcom_base_url: str = "http://alirmcom2.market.alicloudapi.com"
 
     # 商品 symbol 映射（commodity_service 内部按 alirmcom 真实路径再加工）
     commodity_symbols: dict = {
