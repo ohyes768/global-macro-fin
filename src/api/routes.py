@@ -207,28 +207,6 @@ def _compute_incremental_start(
     return start
 
 
-async def _fetch_commodities(
-    commodity_service,
-) -> dict:
-    """获取商品当前实时价（黄金/白银/原油/铜，统一走阿里云 alirmcom2 comrms 批量接口）
-
-    comrms 是实时行情接口，一次调用拿 4 个商品的最新价 + 昨日收盘。
-    历史曲线由本函数返回值每天 append 到 commodities.csv 累积形成。
-
-    Args:
-        commodity_service: 商品服务实例
-
-    Returns:
-        商品当前价字典 {gold: float|None, silver: ..., oil: ..., copper: ...}
-    """
-    logger.info("批量获取商品实时价（comrms）")
-    batch = await commodity_service.fetch_all()
-    # batch: {gold: {realtime, close}, ...} → 拍平为 {gold: realtime, ...}
-    return {
-        name: (info.get("realtime") if isinstance(info, dict) else None)
-        for name, info in batch.items()
-    }
-
 def _build_response_data(new_data: dict, end_date: pd.Timestamp) -> MacroData:
     """构建响应数据的内部函数（不包含汇率）
 
@@ -1762,12 +1740,14 @@ async def update_ted_spread():
 
 
 @router.post("/fetch/commodities/history", response_model=UpdateResponse)
+@router.post("/fetch/commodities/history", response_model=UpdateResponse)
 async def fetch_commodities_history():
-    """获取商品（黄金/白银/原油/铜）数据接口 - comrms 批量接口一次性写入当天快照
+    """获取商品（黄金/白银/原油/铜）日 K 线 - comkm 历史接口拉 5 年全量
 
-    comrms 是实时行情接口，无历史。每次调用拿 4 个商品的当前价 + 昨日收盘，
-    append 到 commodities.csv 当天行（每天一行，多次调用覆盖当天）。
-    历史曲线由多次调用累积形成。
+    comkm 是历史 K 线接口，4 个 symbol 单独翻页拉取。
+    - 本接口：全量从 settings.commodity_history_years 年前到今天 → 写入 commodities.csv
+      （首次部署 / 重建数据用）
+    - 配合 /update/commodities 做日常增量
     """
     global _is_updating
 
@@ -1781,31 +1761,40 @@ async def fetch_commodities_history():
     await acquire_update_lock()
 
     try:
-        logger.info("开始获取商品数据（comrms 批量）...")
+        logger.info("开始获取商品历史 K 线（comkm 全量）...")
         commodity_service = get_commodity_service()
         data_service = get_data_service()
 
-        new_data = await _fetch_commodities(commodity_service)
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (
+            latest_end - pd.Timedelta(days=settings.commodity_history_years * 365)
+        ).normalize()
 
-        if not any(v is not None for v in new_data.values()):
-            raise Exception("未能获取到任何商品数据（阿里云 comrms 返回全空）")
+        logger.info(
+            f"获取商品历史，从 {start_date.strftime('%Y-%m-%d')} 到 {latest_end.strftime('%Y-%m-%d')}"
+        )
+        new_data = await commodity_service.fetch_all(start_date.date(), latest_end.date())
 
-        # 把当天 4 个商品价格 append 到 commodities.csv（同一天多次则覆盖当天行）
-        data_service.append_today_commodities(new_data)
+        if not new_data or all(s.empty for s in new_data.values()):
+            raise Exception("未能获取到任何商品数据（阿里云 comkm 返回全空）")
 
-        gold = new_data.get("gold")
-        silver = new_data.get("silver")
-        oil = new_data.get("oil")
-        copper = new_data.get("copper")
-        today = pd.Timestamp.now().normalize().date()
+        data_service.save_commodities(new_data)
+
+        # 构造响应：取每个商品的最后一个有效值
+        latest_per_commodity: dict = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest_per_commodity[name] = float(series[last_idx])
 
         response_data = CommoditiesUpdateData(
             commodities=CommoditiesData(
-                date=today,
-                gold=gold,
-                silver=silver,
-                oil=oil,
-                copper=copper
+                date=latest_end.date(),
+                gold=latest_per_commodity.get("gold"),
+                silver=latest_per_commodity.get("silver"),
+                oil=latest_per_commodity.get("oil"),
+                copper=latest_per_commodity.get("copper"),
             )
         )
 
@@ -1830,7 +1819,10 @@ async def fetch_commodities_history():
 
 @router.post("/update/commodities", response_model=UpdateResponse)
 async def update_commodities():
-    """更新商品（黄金/白银/原油/铜）数据接口 - 同 fetch/commodities/history（都是当天快照）"""
+    """增量更新商品日 K 线 - 从 CSV last_date+1 拉到今天
+
+    配合 /fetch/commodities/history 做日常 daily 增量更新。
+    """
     global _is_updating
 
     if _is_updating:
@@ -1843,30 +1835,53 @@ async def update_commodities():
     await acquire_update_lock()
 
     try:
-        logger.info("开始增量更新商品数据...")
+        logger.info("开始增量更新商品 K 线...")
         commodity_service = get_commodity_service()
         data_service = get_data_service()
 
-        new_data = await _fetch_commodities(commodity_service)
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = _compute_incremental_start(data_service, "commodities", latest_end)
 
-        if not any(v is not None for v in new_data.values()):
+        if start_date is None:
+            logger.info("商品数据已是最新")
+            today = latest_end.date()
+            return UpdateResponse(
+                success=True,
+                message="商品数据已是最新",
+                data=CommoditiesUpdateData(
+                    commodities=CommoditiesData(
+                        date=today,
+                        gold=None, silver=None, oil=None, copper=None,
+                    )
+                ),
+                updated_at=datetime.now().isoformat(),
+            )
+
+        logger.info(
+            f"增量更新商品，从 {start_date.strftime('%Y-%m-%d')} 到 {latest_end.strftime('%Y-%m-%d')}"
+        )
+        new_data = await commodity_service.fetch_all(start_date.date(), latest_end.date())
+
+        if not new_data or all(s.empty for s in new_data.values()):
             raise Exception("未能获取到任何商品新数据")
 
-        data_service.append_today_commodities(new_data)
+        data_service.save_commodities(new_data)
 
-        gold = new_data.get("gold")
-        silver = new_data.get("silver")
-        oil = new_data.get("oil")
-        copper = new_data.get("copper")
-        today = pd.Timestamp.now().normalize().date()
+        # 构造响应：取每个商品的最后一个有效值
+        latest_per_commodity: dict = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest_per_commodity[name] = float(series[last_idx])
 
         response_data = CommoditiesUpdateData(
             commodities=CommoditiesData(
-                date=today,
-                gold=gold,
-                silver=silver,
-                oil=oil,
-                copper=copper
+                date=latest_end.date(),
+                gold=latest_per_commodity.get("gold"),
+                silver=latest_per_commodity.get("silver"),
+                oil=latest_per_commodity.get("oil"),
+                copper=latest_per_commodity.get("copper"),
             )
         )
 

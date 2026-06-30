@@ -150,8 +150,6 @@ class DataService:
             self._save_exchange_rates(data)
         elif key == "vix":
             self._save_vix(data)
-        elif key == "commodities":
-            self._save_commodities(data)
 
     def _save_by_auto_detection(self, data: Dict[str, pd.Series]) -> None:
         """根据数据键名自动识别并保存到对应的 CSV 文件
@@ -164,14 +162,12 @@ class DataService:
         jp_keys = ["jp_10y", "jp_3m"]
         exchange_keys = ["dollar_index", "usd_cny", "usd_jpy", "usd_eur"]
         vix_keys = ["vix"]
-        commodity_keys = ["gold", "oil", "copper"]
 
         us_data = {k: v for k, v in data.items() if k in us_keys and not v.empty}
         eu_data = {k: v for k, v in data.items() if k in eu_keys and not v.empty}
         jp_data = {k: v for k, v in data.items() if k in jp_keys and not v.empty}
         exchange_data = {k: v for k, v in data.items() if k in exchange_keys and not v.empty}
         vix_data = {k: v for k, v in data.items() if k in vix_keys and not v.empty}
-        commodity_data = {k: v for k, v in data.items() if k in commodity_keys and not v.empty}
 
         if us_data:
             self._save_us_treasuries(us_data)
@@ -183,8 +179,6 @@ class DataService:
             self._save_exchange_rates(exchange_data)
         if vix_data:
             self._save_vix(vix_data)
-        if commodity_data:
-            self._save_commodities(commodity_data)
 
     def _save_us_treasuries(self, data: Dict[str, pd.Series]) -> None:
         """保存美国国债数据
@@ -335,39 +329,40 @@ class DataService:
         self.append_data("ted_spread", ted_df)
         logger.info(f"已保存TED利差数据，共 {len(ted_df)} 条记录")
 
-    def _save_commodities(self, data: Dict[str, pd.Series]) -> None:
-        """保存商品数据（黄金/白银/原油/铜）
+    def save_commodities(self, new_data: Dict[str, pd.Series]) -> None:
+        """保存 4 个商品日 K 线到 commodities.csv（按 date 对齐，缺失填 NaN）
+
+        commodity_service.fetch_all() 返回 4 个 Series（已应用单位换算到展示单位），
+        合并成 DataFrame 后走 append_data（合并 + 去重 + 排序），保证：
+        - fetch/commodities/history 全量拉取 → 覆盖式写入
+        - update/commodities 增量拉取 → 追加合并
 
         Args:
-            data: 商品数据字典，key 为 gold/silver/oil/copper
+            new_data: {gold: Series, silver: Series, oil: Series, copper: Series}
+                     失败的 symbol 对应空 Series（pd.DataFrame 会填 NaN 列）
+                     Series.values 已换算到展示单位（元/克、$/桶、$/吨 等）
         """
-        if not data:
+        expected_cols = ["黄金", "白银", "原油", "铜"]
+
+        if not new_data:
             logger.warning("商品数据为空，跳过保存")
             return
 
-        col_mapping = {
-            "gold": "黄金",
-            "silver": "白银",
-            "oil": "原油",
-            "copper": "铜",
-        }
+        # 合并 4 个 Series 成 DataFrame（按 date 对齐，缺失填 NaN）
+        df = pd.DataFrame(new_data)
+        # commodities.csv 用中文列名（query_data 期望），英文 key 翻译 → 再 reindex 稳列序
+        df = df.rename(columns={
+            "gold": "黄金", "silver": "白银", "oil": "原油", "copper": "铜",
+        })
+        # 稳定列顺序 + 缺失 symbol 补 NaN 列
+        df = df.reindex(columns=expected_cols)
+        df.index.name = "date"
 
-        # 始终保留 4 列（即使某个 series 为空），保证 CSV header 完整
-        commodity_data = {}
-        for fred_key, col_name in col_mapping.items():
-            if fred_key in data and not data[fred_key].empty:
-                commodity_data[col_name] = data[fred_key]
-            else:
-                commodity_data[col_name] = pd.Series(dtype="float64")
-
-        commodity_df = pd.DataFrame(commodity_data)
-        commodity_df.index.name = "date"
-        self._ensure_file_exists(self.files["commodities"], list(col_mapping.values()))
-        self.append_data("commodities", commodity_df)
-        logger.info(
-            f"已保存商品数据: {[k for k, v in commodity_data.items() if not v.empty]}，"
-            f"共 {len(commodity_df)} 条记录"
-        )
+        # 确保 CSV 文件存在（含 4 列 header）
+        self._ensure_file_exists(self.files["commodities"], expected_cols)
+        # append_data 处理合并+去重+排序（last 保留），保证增量更新不重复
+        self.append_data("commodities", df)
+        logger.info(f"已保存商品数据 {len(df)} 条，列: {list(df.columns)}")
 
     def save_ted_spread_data(self, sofr: pd.Series, us_3m: pd.Series) -> None:
         """保存TED利差数据
@@ -443,53 +438,6 @@ class DataService:
         # 保存数据
         self.append_data("fund_flow", fund_flow_df)
         logger.info(f"已保存资金流向数据，共 {len(fund_flow_df)} 条记录")
-
-    def append_today_commodities(self, prices: Dict[str, Optional[float]]) -> None:
-        """把当天 4 个商品价格写入 commodities.csv（每天一行，多次调用覆盖当天）
-
-        适配阿里云 alirmcom2 comrms 实时行情接口：每次调用拿当前价，append 到 CSV
-        形成历史曲线。
-
-        Args:
-            prices: {"gold": 906.19, "silver": None, "oil": 84.36, "copper": 13483.75}
-                    值为 None 表示该商品本次未拿到，跳过（保留旧值或留空）
-        """
-        today = pd.Timestamp.now().normalize()
-        col_mapping = {"gold": "黄金", "silver": "白银", "oil": "原油", "copper": "铜"}
-        expected_cols = list(col_mapping.values())  # ["黄金", "白银", "原油", "铜"]
-
-        # 加载现有数据
-        existing = self.load_data("commodities")
-
-        if existing.empty:
-            # CSV 不存在或为空：创建只含今日 1 行
-            row = {cn: prices.get(name) for name, cn in col_mapping.items()}
-            df = pd.DataFrame([row], index=pd.DatetimeIndex([today], name="date"))
-        else:
-            # 兼容老 CSV（无白银列）：reindex columns 自动补 NaN
-            existing = existing.reindex(columns=expected_cols)
-            if today in existing.index:
-                # 已有今日行：合并（None 不覆盖已有值）
-                idx = existing.index.get_loc(today)
-                for name, cn in col_mapping.items():
-                    v = prices.get(name)
-                    if v is not None:
-                        existing.iloc[idx, existing.columns.get_loc(cn)] = v
-                df = existing
-            else:
-                # 新增今日行（缺失值填 None）
-                row = {cn: prices.get(name) for name, cn in col_mapping.items()}
-                df = existing.append(pd.DataFrame([row], index=pd.DatetimeIndex([today], name="date")))
-
-        df = df.sort_index()
-        # 确保索引名是 "date"（load_data 用 index_col=0）
-        df.index.name = "date"
-        # 写盘
-        self.save_data("commodities", df)
-        logger.info(
-            f"已 append 当天商品快照 ({today.strftime('%Y-%m-%d')}): "
-            f"{[(k, v) for k, v in prices.items() if v is not None]}"
-        )
 
     def save_indices(self, new_data: Dict[str, "pd.Series"]) -> None:
         """保存 5 个全球股指 K 线到 indices.csv（按 date 对齐，缺失填 NaN）

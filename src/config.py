@@ -27,11 +27,31 @@ class Settings(BaseSettings):
 
     # 商品 symbol 映射（commodity_service 内部按 alirmcom 真实路径再加工）
     commodity_symbols: dict = {
-        "gold": "SGEAU9999",     # 上海黄金交易所 Au99.99（元/克）
-        "silver": "SGEAG9999",   # 上海黄金交易所 Ag99.99（元/克）
-        "oil": "UKOIL",          # UKOIL 布伦特原油（美元/桶）
-        "copper": "USHG",        # USHG 铜（美元/吨）
+        "gold": "SGEAU9999",     # 上海黄金交易所 Au99.99（comkm 返回 元/克）
+        "silver": "SGEAG9999",   # 上海黄金交易所 Ag99.99（comkm 返回 元/千克 → service ÷1000 = 元/克）
+        "oil": "UKOIL",          # UKOIL 布伦特原油（comkm 返回 美元/桶）
+        "copper": "USHG",        # USHG 铜（comkm 返回 美元/磅 → service ×2204.62 = 美元/吨）
     }
+
+    # 商品单位换算（service 层对 comkm 返回的 raw close 做 factor 乘）
+    # factor 含义：原始数据 × factor = 展示单位值
+    commodity_units: dict = {
+        "gold":   {"factor": 1.0,     "display": "元/克"},
+        "silver": {"factor": 0.001,   "display": "元/克"},
+        "oil":    {"factor": 1.0,     "display": "$/桶"},
+        "copper": {"factor": 2204.62, "display": "$/吨"},
+    }
+
+    # 商品首行 close sanity check 范围 — 超出即 WARN（不抛异常，让用户看日志决定调 factor）
+    commodity_sanity_range: dict = {
+        "gold":   (100,   2000),   # 元/克
+        "silver": (1,     200),    # 元/克
+        "oil":    (10,    300),    # $/桶
+        "copper": (1000,  30000),  # $/吨
+    }
+
+    # 商品历史拉取窗口（年）
+    commodity_history_years: int = 5
 
     # 全球股指 symbol 映射（裸代码传给 alirmcom2 comkm K线接口）
     index_symbols: dict = {
