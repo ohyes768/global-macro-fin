@@ -1053,6 +1053,9 @@ async def fetch_vix_history():
             raise Exception("未能获取到任何VIX数据")
 
         # 处理VIX数据：时区转换、验证、标准化
+        # 注：update_tga / update_hibor / update_fund_flow / update_ted_spread 省略此三步，
+        # 因为其数据源（HKMA / FRED WTREGEN / akshare / 阿里云）已是干净格式；
+        # 如未来加新源也需评估是否需要这三步
         vix_series = vix_service.convert_timezone(vix_series)
         vix_series = vix_service.validate_data(vix_series)
         vix_series = vix_service.normalize_data(vix_series)
@@ -1110,7 +1113,17 @@ async def update_vix():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "vix", latest_end)
+
+        if start_date is None or start_date > latest_end:
+            # 数据已是最新（或 CSV 已含今天数据），跳过本次更新
+            logger.info("VIX数据已是最新，无需更新")
+            return UpdateResponse(
+                success=True,
+                message="VIX数据已是最新，无需更新",
+                data=VIXUpdateData(vix=VIXData(date=latest_end.date(), value=None)),
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新VIX数据，从 {start_date} 到 {latest_end}")
 
@@ -1241,7 +1254,17 @@ async def update_tga():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "tga", latest_end)
+
+        if start_date is None or start_date > latest_end:
+            # 数据已是最新（或 CSV 已含今天数据），跳过本次更新
+            logger.info("TGA数据已是最新，无需更新")
+            return UpdateResponse(
+                success=True,
+                message="TGA数据已是最新，无需更新",
+                data=TGAUpdateData(tga=TGAData(date=latest_end.date(), value=None)),
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新TGA数据，从 {start_date} 到 {latest_end}")
 
@@ -1363,7 +1386,17 @@ async def update_hibor():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "hibor", latest_end)
+
+        if start_date is None or start_date > latest_end:
+            # 数据已是最新（或 CSV 已含今天数据），跳过本次更新
+            logger.info("HIBOR数据已是最新，无需更新")
+            return UpdateResponse(
+                success=True,
+                message="HIBOR数据已是最新，无需更新",
+                data=HIBORUpdateData(hibor=HIBORData(date=latest_end.date(), value=None)),
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新HIBOR数据，从 {start_date} 到 {latest_end}")
 
@@ -1510,7 +1543,23 @@ async def update_fund_flow():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "fund_flow", latest_end)
+
+        if start_date is None or start_date > latest_end:
+            # 数据已是最新（或 CSV 已含今天数据），跳过本次更新
+            logger.info("资金流向数据已是最新，无需更新")
+            today = latest_end.date()
+            return UpdateResponse(
+                success=True,
+                message="资金流向数据已是最新，无需更新",
+                data=FundFlowUpdateData(
+                    fund_flow=FundFlow(
+                        north=FundFlowData(date=today),
+                        south=FundFlowData(date=today),
+                    )
+                ),
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新资金流向数据，从 {start_date} 到 {latest_end}")
 
@@ -1930,7 +1979,19 @@ async def update_ted_spread():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        start_date = _compute_incremental_start(data_service, "ted_spread", latest_end)
+
+        if start_date is None or start_date > latest_end:
+            # 数据已是最新（或 CSV 已含今天数据），跳过本次更新
+            logger.info("TED利差数据已是最新，无需更新")
+            return UpdateResponse(
+                success=True,
+                message="TED利差数据已是最新，无需更新",
+                data=TedSpreadUpdateData(
+                    ted_spread=TedSpreadData(date=latest_end.date(), sofr=None, us_3m=None, ted_spread=None)
+                ),
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新TED利差数据，从 {start_date} 到 {latest_end}")
 
