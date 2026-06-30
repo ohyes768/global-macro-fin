@@ -551,7 +551,8 @@ class DataService:
                 "south_sell": []
             },
             "china_bond": {
-                "10y": []
+                "10y": [],
+                "spread_10y_2y": []
             },
             "ted_spread": {
                 "sofr": [],
@@ -709,6 +710,11 @@ class DataService:
                 china_bond_full = china_bond_data.reindex(target_index, method="ffill")
                 china_bond_aligned = china_bond_full[(china_bond_full.index >= start_date) & (china_bond_full.index <= end_date)]
                 result["china_bond"]["10y"] = china_bond_aligned[col_10y].tolist()
+
+                # 查找"中国10年-2年"期限利差列（与 10y 列独立查找，避免被含"10年"的匹配误命中）
+                col_spread = next((c for c in china_bond_data.columns if "10年-2年" in str(c) or "spread" in str(c).lower()), None)
+                if col_spread:
+                    result["china_bond"]["spread_10y_2y"] = china_bond_aligned[col_spread].tolist()
 
         # 加载TED利差数据
         ted_data = self.load_data("ted_spread")
