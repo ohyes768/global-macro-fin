@@ -2,9 +2,24 @@
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
+import requests
 import akshare as ak
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from src.config import get_settings
 from src.utils.logger import setup_logger
+
+
+# 东方财富偶发断连/超时：捕获 requests 传输层错误，重试 3 次指数退避
+akshare_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=8),
+    retry=retry_if_exception_type((
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ChunkedEncodingError,
+    )),
+    reraise=True,
+)
 
 logger = setup_logger("fund_flow_service")
 settings = get_settings()
@@ -32,8 +47,8 @@ class FundFlowService:
         try:
             logger.info(f"获取资金流向历史数据: {start_date or self.start_date} 到 {end_date or '今天'}")
 
-            # AKShare 接口：市场资金流向
-            df = ak.stock_market_fund_flow()
+            # AKShare 接口：市场资金流向 (加重试：东方财富偶发 RemoteDisconnected)
+            df = akshare_retry(ak.stock_market_fund_flow)()
 
             # 使用列索引来访问（避免编码问题）
             # 列索引：0=日期, 1=上证净流入, 2=上证涨幅, 3=深证净流入, 4=深证涨幅, 5=沪深港通净流入, 6=沪深港通涨幅
