@@ -81,8 +81,8 @@ class AliyunCommodityClient:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            # comrms 返回的代码可能是 "SGEAU9999" 或 "sh601919"，统一去前缀 + 大写
-            code = item.get("C", "")
+            # comrms 返回的代码在 FS 字段（C 是空字符串），统一去前缀 + 大写
+            code = item.get("FS", "")
             if not code:
                 continue
             code_upper = code.upper()
