@@ -1,6 +1,8 @@
 """数据存储服务模块"""
 import pandas as pd
 import os
+import time
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Tuple
@@ -9,6 +11,25 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger("data_service")
 settings = get_settings()
+
+
+# ==================== query_data 缓存 ====================
+# 缓存策略：全局版本号 + 5min TTL
+# - 用版本号简化失效：所有 save_data() 末尾 _bump_cache_version()，
+#   任何 CSV 写入都让所有缓存 key 失效（不需要精确找 to_csv 点）
+# - 5min TTL 兜底：极端情况下（如忘记调 save_data），5min 后自然失效
+_QUERY_CACHE_TTL_S = 300
+_QUERY_CACHE_MAX_ENTRIES = 16
+_QUERY_CACHE: Dict[Tuple, Tuple[float, Dict]] = {}
+_QUERY_CACHE_LOCK = threading.Lock()
+_CACHE_VERSION = 0  # 全局版本号：每次 CSV 写入 +1，所有缓存 key 失效
+
+
+def _bump_cache_version() -> None:
+    """CSV 写入后调用，让所有 query_data 缓存失效"""
+    global _CACHE_VERSION
+    _CACHE_VERSION += 1
+    logger.debug(f"query_data 缓存版本号 bump 到 {_CACHE_VERSION}")
 
 
 class DataService:
@@ -88,6 +109,8 @@ class DataService:
         try:
             data.to_csv(file_path)
             logger.info(f"成功保存 {data_type} 数据到 {file_path}")
+            # CSV 写入后让 query_data 缓存失效（任何保存路径都走这里）
+            _bump_cache_version()
         except Exception as e:
             logger.error(f"保存 {data_type} 数据失败: {str(e)}")
             raise
@@ -510,7 +533,50 @@ class DataService:
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> Dict:
-        """查询指定时间范围的数据
+        """查询指定时间范围的数据（带 5min LRU 缓存）
+
+        缓存策略：
+        - key = (_CACHE_VERSION, start_date, end_date)
+        - 命中条件：cache 存在 + now - ts < 5min
+        - 失效：save_data() 末尾 _bump_cache_version()，所有 key 失效
+        - 兜底：超过 _QUERY_CACHE_MAX_ENTRIES 清空，防内存爆
+
+        Args:
+            start_date: 起始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+
+        Returns:
+            查询结果字典
+        """
+        cache_key = (_CACHE_VERSION, start_date, end_date)
+        now = time.time()
+
+        with _QUERY_CACHE_LOCK:
+            cached = _QUERY_CACHE.get(cache_key)
+            if cached is not None:
+                ts, data = cached
+                if now - ts < _QUERY_CACHE_TTL_S:
+                    logger.debug(f"query_data 缓存命中: key={cache_key}")
+                    return data
+                # 过期，删除
+                del _QUERY_CACHE[cache_key]
+
+        # 缓存未命中：执行实际查询
+        data = self._query_data_impl(start_date, end_date)
+
+        with _QUERY_CACHE_LOCK:
+            _QUERY_CACHE[cache_key] = (now, data)
+            # 超过 max entries 清空（防内存爆）
+            if len(_QUERY_CACHE) > _QUERY_CACHE_MAX_ENTRIES:
+                _QUERY_CACHE.clear()
+                logger.debug("query_data 缓存超过上限已清空")
+
+        return data
+
+    def _query_data_impl(
+        self, start_date: Optional[str] = None, end_date: Optional[str] = None
+    ) -> Dict:
+        """查询指定时间范围的数据（实际实现，无缓存）
 
         Args:
             start_date: 起始日期 (YYYY-MM-DD)
