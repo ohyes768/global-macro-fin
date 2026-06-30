@@ -96,6 +96,32 @@ class VIXUpdateData(BaseModel):
     vix: VIXData
 
 
+class TGAData(BaseModel):
+    """TGA 账户余额数据（单位：百万美元）"""
+
+    date: date
+    value: Optional[float] = None
+
+
+class TGAUpdateData(BaseModel):
+    """TGA 更新响应数据"""
+
+    tga: TGAData
+
+
+class HIBORData(BaseModel):
+    """HIBOR 隔夜拆息数据（单位：%）"""
+
+    date: date
+    value: Optional[float] = None
+
+
+class HIBORUpdateData(BaseModel):
+    """HIBOR 更新响应数据"""
+
+    hibor: HIBORData
+
+
 class FundFlowData(BaseModel):
     """资金流向数据"""
 
@@ -192,6 +218,8 @@ class UpdateResponse(BaseModel):
         | ExchangeRatesUpdateData
         | MacroDataWithRates
         | VIXUpdateData
+        | TGAUpdateData
+        | HIBORUpdateData
         | MacroDataWithRatesAndVIX
         | FundFlowUpdateData
         | ChinaBondUpdateData

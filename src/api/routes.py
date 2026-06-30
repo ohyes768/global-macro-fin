@@ -24,6 +24,10 @@ from src.models import (
     ExchangeRatesUpdateData,
     VIXData,
     VIXUpdateData,
+    TGAData,
+    TGAUpdateData,
+    HIBORData,
+    HIBORUpdateData,
     FundFlowData,
     FundFlow,
     FundFlowUpdateData,
@@ -44,6 +48,7 @@ from src.services.fred_service import get_fred_service
 from src.services.ecb_service import get_ecb_service
 from src.services.data_service import get_data_service
 from src.services.vix_service import get_vix_service
+from src.services.hibor_service import get_hibor_service
 from src.services.fund_flow_service import get_fund_flow_service
 from src.services.china_bond_service import get_china_bond_service
 from src.services.commodity_service import get_commodity_service
@@ -988,7 +993,7 @@ async def health_check():
 
         # 获取最后更新时间
         last_updates = {}
-        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow", "china_bond", "ted_spread", "indices"]:
+        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow", "china_bond", "ted_spread", "indices", "tga", "hibor"]:
             last_date = data_service.get_last_date(data_type)
             if last_date:
                 last_updates[data_type] = last_date.strftime("%Y-%m-%d")
@@ -1147,6 +1152,250 @@ async def update_vix():
         return UpdateResponse(
             success=False,
             message=f"VIX数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/fetch/tga/history", response_model=UpdateResponse)
+async def fetch_tga_history():
+    """获取 TGA 账户余额历史数据接口 - 从 2000 年开始获取全部历史数据
+
+    数据源：FRED WTREGEN（原始单位：百万美元）
+    """
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取TGA历史数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = pd.Timestamp(settings.historical_start_date)
+
+        logger.info(f"获取TGA历史数据，从 {start_date} 到 {latest_end}")
+
+        tga_code = settings.fred_codes.get("tga", "WTREGEN")
+        tga_series = await fred_service.fetch_series(tga_code, start_date, latest_end)
+
+        if tga_series.empty:
+            raise Exception("未能获取到任何TGA数据")
+
+        tga_data = {"tga": tga_series}
+        data_service.save_fred_data(tga_data, key="tga")
+
+        last_idx = tga_series.last_valid_index()
+        tga_latest = TGAData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(tga_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = TGAUpdateData(tga=tga_latest)
+
+        logger.info("TGA历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="TGA历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取TGA历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取TGA历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/tga", response_model=UpdateResponse)
+async def update_tga():
+    """增量更新 TGA 账户余额数据 - 最近 7 天"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新TGA数据...")
+        fred_service = get_fred_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新TGA数据，从 {start_date} 到 {latest_end}")
+
+        tga_code = settings.fred_codes.get("tga", "WTREGEN")
+        tga_series = await fred_service.fetch_series(tga_code, start_date, latest_end)
+
+        if tga_series.empty:
+            raise Exception("未能获取到任何TGA新数据")
+
+        tga_data = {"tga": tga_series}
+        data_service.save_fred_data(tga_data, key="tga")
+
+        last_idx = tga_series.last_valid_index()
+        tga_latest = TGAData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(tga_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = TGAUpdateData(tga=tga_latest)
+
+        logger.info("TGA数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="TGA数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"TGA数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"TGA数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/fetch/hibor/history", response_model=UpdateResponse)
+async def fetch_hibor_history():
+    """获取 HIBOR 隔夜拆息历史数据接口 - 从 2000 年开始获取全部历史数据
+
+    数据源：HKMA 公开 API
+    """
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取HIBOR历史数据...")
+        hibor_service = get_hibor_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = pd.Timestamp(settings.historical_start_date)
+
+        logger.info(f"获取HIBOR历史数据，从 {start_date} 到 {latest_end}")
+
+        hibor_series = await hibor_service.fetch_series(start_date, latest_end)
+
+        if hibor_series.empty:
+            raise Exception("未能获取到任何HIBOR数据")
+
+        hibor_data = {"hibor": hibor_series}
+        data_service.save_fred_data(hibor_data, key="hibor")
+
+        last_idx = hibor_series.last_valid_index()
+        hibor_latest = HIBORData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(hibor_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = HIBORUpdateData(hibor=hibor_latest)
+
+        logger.info("HIBOR历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="HIBOR历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取HIBOR历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取HIBOR历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/hibor", response_model=UpdateResponse)
+async def update_hibor():
+    """增量更新 HIBOR 隔夜拆息数据 - 最近 7 天"""
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新HIBOR数据...")
+        hibor_service = get_hibor_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+
+        logger.info(f"增量更新HIBOR数据，从 {start_date} 到 {latest_end}")
+
+        hibor_series = await hibor_service.fetch_series(start_date, latest_end)
+
+        if hibor_series.empty:
+            raise Exception("未能获取到任何HIBOR新数据")
+
+        hibor_data = {"hibor": hibor_series}
+        data_service.save_fred_data(hibor_data, key="hibor")
+
+        last_idx = hibor_series.last_valid_index()
+        hibor_latest = HIBORData(
+            date=last_idx.date() if last_idx is not None else latest_end.date(),
+            value=float(hibor_series[last_idx]) if last_idx is not None else None
+        )
+
+        response_data = HIBORUpdateData(hibor=hibor_latest)
+
+        logger.info("HIBOR数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="HIBOR数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"HIBOR数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"HIBOR数据增量更新失败: {str(e)}",
             error_code="UPDATE_FAILED"
         )
     finally:

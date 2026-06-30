@@ -80,6 +80,8 @@ class Settings(BaseSettings):
         "usd_eur": "DEXUSEU",          # 美元兑欧元
         # VIX恐慌指数
         "vix": "VIXCLS",               # CBOE波动率指数
+        # TGA（美国财政部一般账户余额，原始单位百万美元）
+        "tga": "WTREGEN",
         # SOFR（担保隔夜融资利率）
         "sofr": "SOFR",                # 纽约联储银行
         # 商品数据（黄金/白银/原油/铜）已统一改走阿里云市场 API alirmcom2，不再走 FRED

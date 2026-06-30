@@ -30,7 +30,9 @@ class DataService:
             "china_bond": self.data_dir / "china_bond.csv",
             "ted_spread": self.data_dir / "ted_spread.csv",
             "commodities": self.data_dir / "commodities.csv",
-            "indices": self.data_dir / "indices.csv"
+            "indices": self.data_dir / "indices.csv",
+            "tga": self.data_dir / "tga.csv",
+            "hibor": self.data_dir / "hibor.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -150,6 +152,10 @@ class DataService:
             self._save_exchange_rates(data)
         elif key == "vix":
             self._save_vix(data)
+        elif key == "tga":
+            self._save_tga(data)
+        elif key == "hibor":
+            self._save_hibor(data)
 
     def _save_by_auto_detection(self, data: Dict[str, pd.Series]) -> None:
         """根据数据键名自动识别并保存到对应的 CSV 文件
@@ -283,6 +289,38 @@ class DataService:
         self._ensure_file_exists(self.files["vix"], ["Close_VIX"])
         self.append_data("vix", vix_df)
         logger.info(f"已保存VIX数据，共 {len(vix_df)} 条记录")
+
+    def _save_tga(self, data: Dict[str, pd.Series]) -> None:
+        """保存TGA账户余额数据（原始单位：百万美元，前端展示时 ÷1e5 转千亿美元）
+
+        Args:
+            data: TGA数据字典 {"tga": pd.Series}
+        """
+        if "tga" not in data or data["tga"].empty:
+            logger.warning("TGA数据为空，跳过保存")
+            return
+
+        tga_df = pd.DataFrame({"Close_TGA": data["tga"]})
+        tga_df.index.name = "date"
+        self._ensure_file_exists(self.files["tga"], ["Close_TGA"])
+        self.append_data("tga", tga_df)
+        logger.info(f"已保存TGA数据，共 {len(tga_df)} 条记录")
+
+    def _save_hibor(self, data: Dict[str, pd.Series]) -> None:
+        """保存HIBOR隔夜拆息数据（单位：%）
+
+        Args:
+            data: HIBOR数据字典 {"hibor": pd.Series}
+        """
+        if "hibor" not in data or data["hibor"].empty:
+            logger.warning("HIBOR数据为空，跳过保存")
+            return
+
+        hibor_df = pd.DataFrame({"HIBOR_Overnight": data["hibor"]})
+        hibor_df.index.name = "date"
+        self._ensure_file_exists(self.files["hibor"], ["HIBOR_Overnight"])
+        self.append_data("hibor", hibor_df)
+        logger.info(f"已保存HIBOR数据，共 {len(hibor_df)} 条记录")
 
     def _save_china_bond(self, data: Dict[str, pd.Series]) -> None:
         """保存中国国债数据
@@ -532,7 +570,9 @@ class DataService:
                 "SPX": [],
                 "IXIC": [],
                 "DJI": []
-            }
+            },
+            "tga": [],
+            "hibor": []
         }
 
         # 加载美国国债数据
@@ -732,6 +772,28 @@ class DataService:
             for col in ["HKHSI", "SH000001", "SPX", "IXIC", "DJI"]:
                 if col in indices_filtered.columns:
                     result["indices"][col] = indices_filtered[col].tolist()
+
+        # 加载TGA账户余额数据（对齐到美债日期数组）
+        tga_data = self.load_data("tga")
+        if not tga_data.empty:
+            tga_data = tga_data.ffill()
+            tga_filtered = tga_data[(tga_data.index >= start_date) & (tga_data.index <= end_date)]
+            if "Close_TGA" in tga_filtered.columns and not tga_filtered.empty:
+                target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+                tga_full = tga_data.reindex(target_index, method="ffill")
+                tga_aligned = tga_full[(tga_full.index >= start_date) & (tga_full.index <= end_date)]
+                result["tga"] = tga_aligned["Close_TGA"].tolist()
+
+        # 加载HIBOR隔夜拆息数据（对齐到美债日期数组）
+        hibor_data = self.load_data("hibor")
+        if not hibor_data.empty:
+            hibor_data = hibor_data.ffill()
+            hibor_filtered = hibor_data[(hibor_data.index >= start_date) & (hibor_data.index <= end_date)]
+            if "HIBOR_Overnight" in hibor_filtered.columns and not hibor_filtered.empty:
+                target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+                hibor_full = hibor_data.reindex(target_index, method="ffill")
+                hibor_aligned = hibor_full[(hibor_full.index >= start_date) & (hibor_full.index <= end_date)]
+                result["hibor"] = hibor_aligned["HIBOR_Overnight"].tolist()
 
         return result
 
