@@ -37,6 +37,8 @@ from src.models import (
     TedSpreadUpdateData,
     CommoditiesData,
     CommoditiesUpdateData,
+    IndicesData,
+    IndicesUpdateData,
 )
 from src.services.fred_service import get_fred_service
 from src.services.ecb_service import get_ecb_service
@@ -45,6 +47,7 @@ from src.services.vix_service import get_vix_service
 from src.services.fund_flow_service import get_fund_flow_service
 from src.services.china_bond_service import get_china_bond_service
 from src.services.commodity_service import get_commodity_service
+from src.services.index_service import get_index_service
 from src.utils.logger import setup_logger
 from src.config import get_settings
 
@@ -1007,7 +1010,7 @@ async def health_check():
 
         # 获取最后更新时间
         last_updates = {}
-        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow", "china_bond", "ted_spread"]:
+        for data_type in ["us_treasuries", "eu_bonds", "jp_bonds", "exchange_rates", "vix", "fund_flow", "china_bond", "ted_spread", "indices"]:
             last_date = data_service.get_last_date(data_type)
             if last_date:
                 last_updates[data_type] = last_date.strftime("%Y-%m-%d")
@@ -1483,12 +1486,15 @@ async def fetch_china_bonds_history():
         if bond_df.empty:
             raise Exception("未能获取到任何中国国债数据")
 
-        # 保存中国国债数据
-        china_bond_data = {"10y": bond_df.iloc[:, 1] if len(bond_df.columns) > 1 else bond_df.iloc[:, 0]}
+        # 保存中国国债数据（传短 key 让 _save_china_bond 自动加 "中国" 前缀）
+        china_bond_data = {
+            "10y": bond_df["中国国债收益率10年"],
+            "10年-2年": bond_df["中国国债收益率10年-2年"],
+        }
         data_service.save_china_bond_data(china_bond_data)
 
         # 构建响应数据
-        col_10y = bond_df.columns[1] if len(bond_df.columns) > 1 else bond_df.columns[0]
+        col_10y = "中国国债收益率10年"
         last_idx = bond_df.index[-1]
         bond_10y_latest = ChinaBondData(
             date=last_idx.date(),
@@ -1536,7 +1542,21 @@ async def update_china_bonds():
         data_service = get_data_service()
 
         latest_end = pd.Timestamp.now().normalize()
-        start_date = (latest_end - pd.Timedelta(days=7)).normalize()
+        # 复用现有 helper：跟 us_treasuries / exchange_rates 一致，避免数据落后超过 7 天时出 gap
+        start_date = _compute_incremental_start(data_service, "china_bond", latest_end)
+
+        if start_date is None or start_date >= latest_end:
+            # 数据已是最新（或 last_date+1 == today 但 ak 接口今天还没发数据），跳过本次更新
+            logger.info("中国国债数据已是最新，跳过本次更新")
+            response_data = ChinaBondUpdateData(
+                china_bond_10y=ChinaBondData(date=latest_end.date(), value=None)
+            )
+            return UpdateResponse(
+                success=True,
+                message="中国国债数据已是最新，无需更新",
+                data=response_data,
+                updated_at=datetime.now().isoformat(),
+            )
 
         logger.info(f"增量更新中国国债数据，从 {start_date} 到 {latest_end}")
 
@@ -1546,12 +1566,15 @@ async def update_china_bonds():
         if bond_df.empty:
             raise Exception("未能获取到任何中国国债新数据")
 
-        # 保存中国国债数据
-        china_bond_data = {"10y": bond_df.iloc[:, 1] if len(bond_df.columns) > 1 else bond_df.iloc[:, 0]}
+        # 保存中国国债数据（传短 key 让 _save_china_bond 自动加 "中国" 前缀）
+        china_bond_data = {
+            "10y": bond_df["中国国债收益率10年"],
+            "10年-2年": bond_df["中国国债收益率10年-2年"],
+        }
         data_service.save_china_bond_data(china_bond_data)
 
         # 构建响应数据
-        col_10y = bond_df.columns[1] if len(bond_df.columns) > 1 else bond_df.columns[0]
+        col_10y = "中国国债收益率10年"
         last_idx = bond_df.index[-1]
         bond_10y_latest = ChinaBondData(
             date=last_idx.date(),
@@ -1860,6 +1883,163 @@ async def update_commodities():
         return UpdateResponse(
             success=False,
             message=f"商品数据增量更新失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/fetch/indices/history", response_model=UpdateResponse)
+async def fetch_indices_history():
+    """获取全球股指（恒生/上证/标普500/纳指/道指）历史 K 线 - 5 年全量
+
+    comkm 是历史 K 线接口，5 个 symbol 单独翻页拉取。
+    - 本接口：全量从 5 年前到今天 → 写入 indices.csv（首次部署 / 重建数据用）
+    - 配合 /update/indices 做日常增量
+    """
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始获取股指历史 K 线（comkm 全量）...")
+        index_service = get_index_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        # 5 年历史（够 5Y 时间范围用）
+        start_date = (latest_end - pd.Timedelta(days=5 * 365)).normalize()
+
+        logger.info(
+            f"获取股指历史，从 {start_date.strftime('%Y-%m-%d')} 到 {latest_end.strftime('%Y-%m-%d')}"
+        )
+        new_data = await index_service.fetch_all(start_date.date(), latest_end.date())
+
+        if not new_data or all(s.empty for s in new_data.values()):
+            raise Exception("未能获取到任何股指数据（阿里云 comkm 返回全空）")
+
+        data_service.save_indices(new_data)
+
+        # 构造响应：取每个 symbol 的最后有效值
+        latest_per_idx: dict = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest_per_idx[name] = float(series[last_idx])
+
+        response_data = IndicesUpdateData(
+            indices=IndicesData(
+                date=latest_end.date(),
+                HKHSI=latest_per_idx.get("HKHSI"),
+                SH000001=latest_per_idx.get("SH000001"),
+                SPX=latest_per_idx.get("SPX"),
+                IXIC=latest_per_idx.get("IXIC"),
+                DJI=latest_per_idx.get("DJI"),
+            )
+        )
+
+        logger.info("股指历史数据获取成功")
+        return UpdateResponse(
+            success=True,
+            message="股指历史数据获取成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"获取股指历史数据失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"获取股指历史数据失败: {str(e)}",
+            error_code="UPDATE_FAILED"
+        )
+    finally:
+        release_update_lock()
+
+
+@router.post("/update/indices", response_model=UpdateResponse)
+async def update_indices():
+    """增量更新股指 K 线 - 从 CSV last_date+1 拉到今天
+
+    配合 /fetch/indices/history 做日常 daily 增量更新。
+    """
+    global _is_updating
+
+    if _is_updating:
+        return UpdateResponse(
+            success=False,
+            message="数据更新正在进行中，请稍后再试",
+            error_code="UPDATE_IN_PROGRESS"
+        )
+
+    await acquire_update_lock()
+
+    try:
+        logger.info("开始增量更新股指 K 线...")
+        index_service = get_index_service()
+        data_service = get_data_service()
+
+        latest_end = pd.Timestamp.now().normalize()
+        start_date = _compute_incremental_start(data_service, "indices", latest_end)
+
+        if start_date is None:
+            logger.info("股指数据已是最新")
+            return UpdateResponse(
+                success=True,
+                message="股指数据已是最新",
+                data=IndicesUpdateData(indices=IndicesData(date=latest_end.date())),
+                updated_at=datetime.now().isoformat(),
+            )
+
+        logger.info(
+            f"增量更新股指，从 {start_date.strftime('%Y-%m-%d')} 到 {latest_end.strftime('%Y-%m-%d')}"
+        )
+        new_data = await index_service.fetch_all(start_date.date(), latest_end.date())
+
+        if not new_data or all(s.empty for s in new_data.values()):
+            raise Exception("未能获取到任何股指新数据")
+
+        data_service.save_indices(new_data)
+
+        latest_per_idx: dict = {}
+        for name, series in new_data.items():
+            if not series.empty:
+                last_idx = series.last_valid_index()
+                if last_idx is not None:
+                    latest_per_idx[name] = float(series[last_idx])
+
+        response_data = IndicesUpdateData(
+            indices=IndicesData(
+                date=latest_end.date(),
+                HKHSI=latest_per_idx.get("HKHSI"),
+                SH000001=latest_per_idx.get("SH000001"),
+                SPX=latest_per_idx.get("SPX"),
+                IXIC=latest_per_idx.get("IXIC"),
+                DJI=latest_per_idx.get("DJI"),
+            )
+        )
+
+        logger.info("股指数据增量更新成功")
+        return UpdateResponse(
+            success=True,
+            message="股指数据增量更新成功",
+            data=response_data,
+            updated_at=datetime.now().isoformat(),
+        )
+
+    except Exception as e:
+        logger.error(f"股指数据增量更新失败: {str(e)}")
+        return UpdateResponse(
+            success=False,
+            message=f"股指数据增量更新失败: {str(e)}",
             error_code="UPDATE_FAILED"
         )
     finally:

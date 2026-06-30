@@ -33,6 +33,15 @@ class Settings(BaseSettings):
         "copper": "USHG",        # USHG 铜（美元/吨）
     }
 
+    # 全球股指 symbol 映射（裸代码传给 alirmcom2 comkm K线接口）
+    index_symbols: dict = {
+        "HKHSI": "HKHSI",       # 恒生指数
+        "SH000001": "SH000001", # 上证指数（沿用 A 股 SH 前缀规则）
+        "SPX": "SPX",           # 标普500
+        "IXIC": "IXIC",         # 纳斯达克综合
+        "DJI": "DJI",           # 道琼斯
+    }
+
     # FRED 数据代码
     fred_codes: dict = {
         "us_3m": "DGS3MO",

@@ -29,7 +29,8 @@ class DataService:
             "fund_flow": self.data_dir / "fund_flow.csv",
             "china_bond": self.data_dir / "china_bond.csv",
             "ted_spread": self.data_dir / "ted_spread.csv",
-            "commodities": self.data_dir / "commodities.csv"
+            "commodities": self.data_dir / "commodities.csv",
+            "indices": self.data_dir / "indices.csv"
         }
 
     def _ensure_file_exists(self, file_path: Path, columns: list) -> None:
@@ -490,6 +491,36 @@ class DataService:
             f"{[(k, v) for k, v in prices.items() if v is not None]}"
         )
 
+    def save_indices(self, new_data: Dict[str, "pd.Series"]) -> None:
+        """保存 5 个全球股指 K 线到 indices.csv（按 date 对齐，缺失填 NaN）
+
+        index_service.fetch_all() 返回 5 个 Series，合并成 DataFrame 后走
+        append_data（合并 + 去重 + 排序），保证：
+        - fetch/indices/history 全量拉取 → 覆盖式写入
+        - update/indices 增量拉取 → 追加合并
+
+        Args:
+            new_data: {HKHSI: Series(date->close), SH000001: Series, ...}
+                     失败的 symbol 对应空 Series（pd.DataFrame 会填 NaN 列）
+        """
+        expected_cols = ["HKHSI", "SH000001", "SPX", "IXIC", "DJI"]
+
+        if not new_data:
+            logger.warning("股指数据为空，跳过保存")
+            return
+
+        # 合并 5 个 Series 成 DataFrame（按 date 对齐，缺失填 NaN）
+        df = pd.DataFrame(new_data)
+        # 稳定列顺序 + 缺失 symbol 补 NaN 列
+        df = df.reindex(columns=expected_cols)
+        df.index.name = "date"
+
+        # 确保 CSV 文件存在（含 5 列 header）
+        self._ensure_file_exists(self.files["indices"], expected_cols)
+        # append_data 处理合并+去重+排序（last 保留），保证增量更新不重复
+        self.append_data("indices", df)
+        logger.info(f"已保存股指数据 {len(df)} 条，列: {list(df.columns)}")
+
     def query_data(
         self, start_date: Optional[str] = None, end_date: Optional[str] = None
     ) -> Dict:
@@ -546,6 +577,13 @@ class DataService:
                 "silver": [],
                 "oil": [],
                 "copper": []
+            },
+            "indices": {
+                "HKHSI": [],
+                "SH000001": [],
+                "SPX": [],
+                "IXIC": [],
+                "DJI": []
             }
         }
 
@@ -731,6 +769,21 @@ class DataService:
             for chinese_col, api_col in col_mapping.items():
                 if chinese_col in commodity_filtered.columns:
                     result["commodities"][api_col] = commodity_filtered[chinese_col].tolist()
+
+        # 加载全球股指数据（恒生/上证/标普500/纳指/道指）
+        indices_data = self.load_data("indices")
+        if not indices_data.empty:
+            indices_data = indices_data.ffill()
+
+            # 与 commodities 一致：reindex 到 target_index 保证长度对齐 dates
+            target_index = us_data.index if not us_data.empty else pd.date_range(start_date, end_date)
+            indices_aligned = indices_data.reindex(target_index, method="ffill")
+            indices_filtered = indices_aligned[(indices_aligned.index >= start_date) & (indices_aligned.index <= end_date)]
+
+            # 列名直接用 symbol（HKHSI/SH000001/SPX/IXIC/DJI），与前端 EconomicDataResponse.indices 对应
+            for col in ["HKHSI", "SH000001", "SPX", "IXIC", "DJI"]:
+                if col in indices_filtered.columns:
+                    result["indices"][col] = indices_filtered[col].tolist()
 
         return result
 

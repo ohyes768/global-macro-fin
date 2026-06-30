@@ -197,6 +197,7 @@ class UpdateResponse(BaseModel):
         | ChinaBondUpdateData
         | TedSpreadUpdateData
         | CommoditiesUpdateData
+        | IndicesUpdateData
     ] = None
     updated_at: Optional[str] = None
     error_code: Optional[str] = None
@@ -262,3 +263,20 @@ class CommoditiesUpdateData(BaseModel):
     """商品更新响应数据"""
 
     commodities: CommoditiesData
+
+
+class IndicesData(BaseModel):
+    """5 个全球股指 K 线数据（恒生/上证/标普500/纳指/道指，统一走阿里云 alirmcom2 comkm）"""
+
+    date: date
+    HKHSI: Optional[float] = None       # 恒生指数
+    SH000001: Optional[float] = None    # 上证指数
+    SPX: Optional[float] = None         # 标普500
+    IXIC: Optional[float] = None        # 纳斯达克综合
+    DJI: Optional[float] = None         # 道琼斯
+
+
+class IndicesUpdateData(BaseModel):
+    """股指更新响应数据"""
+
+    indices: IndicesData
